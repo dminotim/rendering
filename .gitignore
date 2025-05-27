@@ -1,0 +1,17 @@
+# macOS system files
+.DS_Store
+
+# Build directories
+/build/
+/out/
+/bin/
+/cmake-build-debug/
+/cmake-build-release/
+# Editors/IDEs
+.idea/
+.vscode/
+
+# Compiled files
+*.o
+*.a
+*.dylib
