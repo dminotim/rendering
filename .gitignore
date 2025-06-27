@@ -15,3 +15,5 @@
 *.o
 *.a
 *.dylib
+all_sources.txt
+concat.py
