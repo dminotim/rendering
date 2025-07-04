@@ -17,7 +17,7 @@ namespace dmrender
     };
 
 
-    std::shared_ptr<Device> MetalDevice::createDefaultDevice() {
+    std::shared_ptr<Device> MetalDevice::createDefaultDevice(const std::shared_ptr<Surface>& /*surface*/) {
         id<MTLDevice> nativeDevice = MTLCreateSystemDefaultDevice();
         if (!nativeDevice) {
             std::cerr << "MetalDevice Error: Failed to create system default MTLDevice." << std::endl;

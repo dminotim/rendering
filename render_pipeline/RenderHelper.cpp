@@ -30,21 +30,21 @@ namespace dmrender
 {
     namespace helper
     {
-        std::shared_ptr<Device> createDefaultDevice()
+        std::shared_ptr<Device> createDefaultDevice(const std::shared_ptr<Surface>& surface)
         {
             #if defined(__APPLE__)
-                return MetalDevice::createDefaultDevice();
+                return MetalDevice::createDefaultDevice(surface);
             #else
                 static_assert(false, "CreateDefaultDevice is not implemented for this platform.");
                 return nullptr;
             #endif
         }
 
-        std::shared_ptr<Surface> createSurface(GLFWwindow *window, const std::shared_ptr<Device>& device, ImageFormat imageFormat)
+        std::shared_ptr<Surface> createSurface(GLFWwindow *window, ImageFormat imageFormat)
         {
             #if defined(__APPLE__)
                 // .get() нужен, чтобы передать сырой указатель в конструктор
-                return std::make_shared<MetalOutSurface>(window, device, imageFormat);
+                return std::make_shared<MetalOutSurface>(window, imageFormat);
             #else
                 static_assert(false, "CreateOutSurface is not implemented for this platform.");
                 return nullptr;

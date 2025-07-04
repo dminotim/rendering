@@ -45,15 +45,14 @@ namespace dmrender
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
         GLFWwindow* window = glfwCreateWindow(1280, 720, "Grid Renderer", nullptr, nullptr);
         if (!window) { glfwTerminate(); return; }
-
-        std::shared_ptr<Device> device = helper::createDefaultDevice();
+        std::shared_ptr<Surface> surface = helper::createSurface(window, ImageFormat::BGRA8_UNORM);
+        std::shared_ptr<Device> device = helper::createDefaultDevice(surface);
 
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGui_ImplGlfw_InitForOther(window, true);
         helper::initImgui(device); // Инициализация ImGui через хелпер
 
-        std::shared_ptr<Surface> surface = helper::createSurface(window, device, ImageFormat::BGRA8_UNORM);
         std::shared_ptr<CommandQueue> cmdLists = helper::createCommandQueue(device);
 
         int fbWidth, fbHeight;

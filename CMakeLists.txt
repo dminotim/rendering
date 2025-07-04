@@ -3,7 +3,7 @@
 cmake_minimum_required(VERSION 3.20) # Lowered for better compatibility
 if(APPLE)
     project(RenderingProject LANGUAGES C CXX OBJC OBJCXX)
- else()
+else()
     project(RenderingProject LANGUAGES C CXX)
 endif()
 
@@ -59,7 +59,7 @@ if(APPLE)
 elseif(WIN32)
     message(STATUS "Configuring for Windows")
     list(APPEND PLATFORM_SRC
-        external/imgui/backends/imgui_impl_vulkan.cpp
+            external/imgui/backends/imgui_impl_vulkan.cpp
     )
     # Example for a future DirectX 12 backend
     # file(GLOB_RECURSE DX12_IMPL_SRC
@@ -126,8 +126,8 @@ if(APPLE)
             "-framework Foundation" # Often needed for Objective-C objects
     )
 elseif(WIN32)
-     target_link_libraries(${APP_NAME} PRIVATE
-        glfw
-        Vulkan::Vulkan
+    target_link_libraries(${APP_NAME} PRIVATE
+            glfw
+            Vulkan::Vulkan
     )
 endif()

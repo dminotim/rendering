@@ -34,9 +34,9 @@ namespace dmrender
     {
         // --- Factory Functions for Core Graphics Objects ---
 
-        std::shared_ptr<Device> createDefaultDevice();
+        std::shared_ptr<Device> createDefaultDevice(const std::shared_ptr<Surface>& surface);
 
-        std::shared_ptr<Surface> createSurface(GLFWwindow* window, const std::shared_ptr<Device>& device, ImageFormat imageFormat);
+        std::shared_ptr<Surface> createSurface(GLFWwindow* window, ImageFormat imageFormat);
 
         std::shared_ptr<SwapChain> createSwapChain(
                 const std::shared_ptr<Device>& device,
