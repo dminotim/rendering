@@ -20,12 +20,10 @@
 
 #include "RenderHelper.hpp"
 
-#include <simd/simd.h>
-
 namespace dmrender
 {
     struct Vertex {
-        vector_float2 position;
+        float position[2];
     };
 
     struct Uniforms {
