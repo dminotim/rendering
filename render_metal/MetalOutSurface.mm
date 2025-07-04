@@ -17,8 +17,8 @@ namespace dmrender {
         NSView* m_nsview;
         NSWindow* m_nswin;
     };
-    MetalOutSurface::MetalOutSurface(GLFWwindow *window, const std::shared_ptr<Device>& device, ImageFormat imageFormat_)
-    : Surface(window, device, imageFormat_), m_data(std::make_unique<MetalOutSurfaceNativeData>()) {
+    MetalOutSurface::MetalOutSurface(GLFWwindow *window, ImageFormat imageFormat_)
+    : Surface(window, imageFormat_), m_data(std::make_unique<MetalOutSurfaceNativeData>()) {
         m_data->m_nswin = glfwGetCocoaWindow(window);
         m_data->m_nsview = (m_data->m_nswin).contentView;
         m_data->m_nsview.wantsLayer = YES;

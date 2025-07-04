@@ -13,7 +13,7 @@ struct MetalOutSurfaceNativeData;
 
 class MetalOutSurface : public Surface {
 public:
-    MetalOutSurface(GLFWwindow *window, const std::shared_ptr<Device>& device, ImageFormat imageFormat_);
+    MetalOutSurface(GLFWwindow *window, ImageFormat imageFormat_);
 
     ~MetalOutSurface() override;
 

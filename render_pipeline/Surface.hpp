@@ -47,15 +47,6 @@ namespace dmrender {
         ImageFormat getFormat() const {
             return m_format;
         }
-
-        /**
-         * @brief Gets the graphics device associated with this surface.
-         * @return A shared pointer to the Device.
-         */
-        std::shared_ptr<Device> getDevice() const {
-            return m_device;
-        }
-
         /**
          * @brief Gets the GLFW window handle this surface was created from.
          * @return A pointer to the GLFWwindow.
@@ -71,15 +62,13 @@ namespace dmrender {
          * @param device The graphics device that will render to this surface.
          * @param format The desired pixel format for the surface.
          */
-        explicit Surface(GLFWwindow* window, const std::shared_ptr<Device>& device, ImageFormat format)
-                : m_window(window), m_device(device), m_format(format)
+        explicit Surface(GLFWwindow* window, ImageFormat format)
+                : m_window(window), m_format(format)
         {
         }
 
         /// @brief The GLFW window associated with this surface.
         GLFWwindow* m_window;
-        /// @brief The graphics device that owns this surface.
-        std::shared_ptr<Device> m_device;
         /// @brief The pixel format of the surface.
         ImageFormat m_format;
     };
