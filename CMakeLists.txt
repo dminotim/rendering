@@ -1,7 +1,11 @@
 # --- Project Definition ---
 # Specifies the minimum required version of CMake and defines the project.
 cmake_minimum_required(VERSION 3.20) # Lowered for better compatibility
-project(RenderingProject LANGUAGES C CXX OBJC OBJCXX)
+if(APPLE)
+    project(RenderingProject LANGUAGES C CXX OBJC OBJCXX)
+else()
+    project(RenderingProject LANGUAGES C CXX)
+endif()
 
 # Set the C++ standard for the entire project.
 set(CMAKE_CXX_STANDARD 20)
@@ -24,6 +28,7 @@ message(STATUS "Shaders directory set to: ${SHADER_DIR}")
 
 # --- External Dependencies ---
 # Add submodules/external libraries.
+find_package(Vulkan REQUIRED)
 add_subdirectory(external/glfw)
 
 # --- Source File Collection (Automated) ---
@@ -53,6 +58,9 @@ if(APPLE)
     )
 elseif(WIN32)
     message(STATUS "Configuring for Windows")
+    list(APPEND PLATFORM_SRC
+            external/imgui/backends/imgui_impl_vulkan.cpp
+    )
     # Example for a future DirectX 12 backend
     # file(GLOB_RECURSE DX12_IMPL_SRC
     #     "${CMAKE_SOURCE_DIR}/render_dx12/*.hpp"
@@ -118,11 +126,8 @@ if(APPLE)
             "-framework Foundation" # Often needed for Objective-C objects
     )
 elseif(WIN32)
-    # For a future DirectX backend, include its headers and link libraries.
-    # target_include_directories(${APP_NAME} PRIVATE render_dx12)
-    # target_link_libraries(${APP_NAME} PRIVATE
-    #     glfw
-    #     d3d12.lib
-    #     dxgi.lib
-    # )
+    target_link_libraries(${APP_NAME} PRIVATE
+            glfw
+            Vulkan::Vulkan
+    )
 endif()
