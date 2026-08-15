@@ -8,8 +8,10 @@
 
 namespace dmrender {
 
-    bool InitImguiMetal(std::shared_ptr<Device> device) {
-        auto mDevice = (id <MTLDevice>) device->nativeHandle();
+    bool InitImguiMetal(const std::shared_ptr<SwapChain>& swapChain) {
+        // Metal only needs the device here; the swapchain is taken for signature parity with the
+        // Vulkan backend, which cannot initialise ImGui before the swapchain exists.
+        auto mDevice = (id <MTLDevice>) swapChain->getDevice()->nativeHandle();
         ImGui_ImplMetal_Init(mDevice);
         return true;
     }

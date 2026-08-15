@@ -88,6 +88,30 @@ namespace dmrender
          */
         virtual void recreate(uint32_t newWidth, uint32_t newHeight) = 0;
 
+        /**
+         * @brief Gets the logical device this swapchain presents from.
+         * @return A shared pointer to the parent Device.
+         */
+        std::shared_ptr<Device> getDevice() const {
+            return m_device;
+        }
+
+        /**
+         * @brief Gets the command queue used to present this swapchain's images.
+         * @return A shared pointer to the parent CommandQueue.
+         */
+        std::shared_ptr<CommandQueue> getCommandQueue() const {
+            return m_commandQueue;
+        }
+
+        /**
+         * @brief Gets the surface this swapchain presents to.
+         * @return A shared pointer to the target Surface.
+         */
+        std::shared_ptr<Surface> getSurface() const {
+            return m_surface;
+        }
+
     protected:
         std::shared_ptr<Device> m_device;
         std::shared_ptr<CommandQueue> m_commandQueue;

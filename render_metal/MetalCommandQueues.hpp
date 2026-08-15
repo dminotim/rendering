@@ -16,6 +16,8 @@ namespace dmrender {
         explicit MetalCommandQueues(const std::shared_ptr<Device>& device);
         ~MetalCommandQueues() override;
 
+        std::shared_ptr<CommandBuffer> getCommandBuffer() override;
+
         void* nativeHandle() const override;
 
     private:

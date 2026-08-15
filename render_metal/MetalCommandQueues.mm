@@ -1,4 +1,5 @@
 #include "MetalCommandQueues.hpp"
+#include "MetalCommandbuffer.hpp"
 
 #import <Metal/Metal.h>
 #import <cassert>
@@ -39,6 +40,11 @@ namespace dmrender
     }
 
     // --- Public API Implementation ---
+
+    std::shared_ptr<CommandBuffer> MetalCommandQueues::getCommandBuffer() {
+        // MetalCommandBuffer pulls a fresh MTLCommandBuffer out of the queue in its constructor.
+        return std::make_shared<MetalCommandBuffer>(shared_from_this());
+    }
 
     void* MetalCommandQueues::nativeHandle() const {
         // Provide access to the underlying native object for interoperability.

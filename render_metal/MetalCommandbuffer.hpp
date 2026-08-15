@@ -5,7 +5,7 @@
 #ifndef RENDERING_METALCOMMANDBUFFER_HPP
 #define RENDERING_METALCOMMANDBUFFER_HPP
 #include "Commandbuffer.hpp"
-#import "CommandQueue.hpp"
+#include "CommandQueue.hpp"
 #include <memory>
 
 namespace dmrender {
