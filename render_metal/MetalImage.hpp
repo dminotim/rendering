@@ -61,6 +61,8 @@ namespace dmrender {
 
         ImageUsage usage() const override;
 
+        MemoryLocation memoryLocation() const override;
+
         void *nativeHandle() const override;
 
         const std::string& debugName() const override;

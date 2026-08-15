@@ -6,6 +6,8 @@
 #import <Metal/Metal.h>
 #import <iostream>
 #import <cassert>
+#import <cstring>
+#import <stdexcept>
 
 #if defined(__APPLE__) && defined(__OBJC__)
 
@@ -16,6 +18,11 @@ namespace dmrender
     struct MetalDeviceNativeData
     {
         id<MTLDevice> m_device = nil;
+        /// Created on first use; only resource uploads ever touch it, never the render loop.
+        id<MTLCommandQueue> m_transferQueue = nil;
+        /// Reused across uploads and grown on demand, mirroring the Vulkan staging buffer.
+        id<MTLBuffer> m_stagingBuffer = nil;
+        size_t m_stagingCapacity = 0;
     };
 
 
@@ -86,6 +93,14 @@ namespace dmrender
     }
 
     MetalDevice::~MetalDevice() {
+        if (m_data->m_stagingBuffer) {
+            [m_data->m_stagingBuffer release];
+            m_data->m_stagingBuffer = nil;
+        }
+        if (m_data->m_transferQueue) {
+            [m_data->m_transferQueue release];
+            m_data->m_transferQueue = nil;
+        }
         if (m_data->m_device) {
             [m_data->m_device release];
             m_data->m_device = nil;
@@ -152,6 +167,72 @@ namespace dmrender
             return nullptr;
         }
         return std::make_shared<MetalSampler>(this, desc, debugName);
+    }
+
+    MemoryBudget MetalDevice::queryMemoryBudget() const {
+        MemoryBudget budget{};
+        if (!m_data->m_device) {
+            return budget;
+        }
+
+        // recommendedMaxWorkingSetSize is Metal's equivalent of VK_EXT_memory_budget's heapBudget:
+        // how much the device would like this process to keep resident. currentAllocatedSize is
+        // what this process has actually allocated, so the two together give the same picture the
+        // Vulkan path reports.
+        budget.deviceLocalBudgetBytes = [m_data->m_device recommendedMaxWorkingSetSize];
+        budget.deviceLocalUsedBytes = [m_data->m_device currentAllocatedSize];
+        budget.deviceLocalTotalBytes = budget.deviceLocalBudgetBytes;
+        budget.preciseBudget = true;
+
+        if (@available(macOS 10.15, iOS 13.0, *)) {
+            budget.unifiedMemory = [m_data->m_device hasUnifiedMemory];
+        } else {
+            budget.unifiedMemory = false;
+        }
+        return budget;
+    }
+
+    void MetalDevice::uploadToPrivateBuffer(void* destination,
+                                            size_t destinationOffset,
+                                            const void* data,
+                                            size_t size) const {
+        if (!destination || !data || size == 0) return;
+
+        auto mtlDestination = (__bridge id<MTLBuffer>)destination;
+
+        if (!m_data->m_transferQueue) {
+            m_data->m_transferQueue = [m_data->m_device newCommandQueue];
+            m_data->m_transferQueue.label = @"dmrender transfer";
+        }
+
+        if (size > m_data->m_stagingCapacity) {
+            if (m_data->m_stagingBuffer) {
+                [m_data->m_stagingBuffer release];
+                m_data->m_stagingBuffer = nil;
+            }
+            m_data->m_stagingBuffer = [m_data->m_device newBufferWithLength:size
+                                                                    options:MTLResourceStorageModeShared];
+            if (!m_data->m_stagingBuffer) {
+                throw std::runtime_error("MetalDevice: failed to allocate the staging buffer");
+            }
+            m_data->m_stagingBuffer.label = @"dmrender staging";
+            m_data->m_stagingCapacity = size;
+        }
+
+        memcpy([m_data->m_stagingBuffer contents], data, size);
+
+        id<MTLCommandBuffer> commandBuffer = [m_data->m_transferQueue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        [blit copyFromBuffer:m_data->m_stagingBuffer
+                sourceOffset:0
+                    toBuffer:mtlDestination
+           destinationOffset:destinationOffset
+                        size:size];
+        [blit endEncoding];
+        [commandBuffer commit];
+        // Waiting keeps the staging buffer safe to overwrite on the next call and lets the caller
+        // treat createBuffer() as "the data is there when this returns".
+        [commandBuffer waitUntilCompleted];
     }
 
 } // namespace dmrender

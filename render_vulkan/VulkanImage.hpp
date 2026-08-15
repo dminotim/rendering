@@ -68,6 +68,7 @@ namespace dmrender {
         ImageFormat format() const override;
         ImageType type() const override;
         ImageUsage usage() const override;
+        MemoryLocation memoryLocation() const override;
 
         /// @return Pointer to the VkImage handle.
         void* nativeHandle() const override;

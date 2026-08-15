@@ -91,6 +91,8 @@ namespace dmrender {
             const std::string& debugName
         ) override;
 
+        MemoryBudget queryMemoryBudget() const override;
+
         void* nativeHandle() const override;
         void* getLogicalDevice() const;
         uint32_t getGraphicsFamilyIndex() const;
@@ -130,6 +132,45 @@ namespace dmrender {
          * @note Must be called before the view itself is destroyed, and after the device is idle.
          */
         void invalidateFramebuffersUsing(VkImageView view);
+
+        /**
+         * @brief Picks a memory type index, preferring @p preferred and falling back to @p required.
+         *
+         * Used to express "device-local if the driver offers it, host-visible otherwise" in one
+         * call, so an integrated GPU with no separate VRAM heap still gets a valid allocation.
+         *
+         * @param typeBits The memoryTypeBits from the resource's VkMemoryRequirements.
+         * @param preferred Property flags to try first.
+         * @param required Property flags to accept if @p preferred is unavailable.
+         * @param[out] outFlags The property flags of the type that was actually chosen.
+         * @return The chosen memory type index.
+         */
+        uint32_t selectMemoryType(uint32_t typeBits,
+                                  VkMemoryPropertyFlags preferred,
+                                  VkMemoryPropertyFlags required,
+                                  VkMemoryPropertyFlags& outFlags) const;
+
+        /**
+         * @brief Copies CPU data into a device-local buffer through a staging buffer.
+         *
+         * Device-local memory on a discrete GPU is not CPU-addressable, so the bytes are written
+         * into a host-visible staging buffer the device keeps around, then copied on the GPU with
+         * vkCmdCopyBuffer. The submit is waited on before returning, which makes this a
+         * synchronous, stalling operation — fine at resource creation time, deliberately
+         * unattractive for per-frame updates (that is what BufferUsage::Dynamic is for).
+         *
+         * @param destination The device-local buffer to write into.
+         * @param destinationOffset Byte offset within @p destination.
+         * @param data The bytes to upload.
+         * @param size How many bytes to upload.
+         */
+        void uploadToDeviceLocalBuffer(VkBuffer destination,
+                                       VkDeviceSize destinationOffset,
+                                       const void* data,
+                                       VkDeviceSize size);
+
+        /// @brief True when VK_EXT_memory_budget was available and enabled.
+        bool hasMemoryBudgetExtension() const;
 
         /**
          * @brief Index of the frame slot currently being recorded, in [0, kFramesInFlight).

@@ -8,6 +8,8 @@
 #include <string>
 #include <type_traits> // For std::underlying_type
 
+#include "Memory.hpp"
+
 namespace dmrender {
 
     /**
@@ -112,6 +114,15 @@ namespace dmrender {
         virtual ImageFormat format() const = 0;
         virtual ImageType type() const = 0;
         virtual ImageUsage usage() const = 0;
+
+        /**
+         * @brief Reports where this image's memory actually landed.
+         * @return Always MemoryLocation::DeviceLocal for images this library creates — a render
+         *         target or sampled texture is never worth placing in host-visible memory.
+         *         Swapchain images report DeviceLocal as well; their memory belongs to the
+         *         presentation engine and does not count against the application's budget.
+         */
+        virtual MemoryLocation memoryLocation() const = 0;
 
         /**
          * @brief Retrieves the native handle for the underlying texture resource.

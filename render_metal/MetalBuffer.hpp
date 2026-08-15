@@ -39,6 +39,7 @@ namespace dmrender {
         BufferType type() const override;
         BufferUsage usage() const override;
         size_t size() const override;
+        MemoryLocation memoryLocation() const override;
         void update(const void* data, size_t dataSize, size_t offset) override;
         void* nativeHandle() const override;
         const std::string& debugName() const override;

@@ -129,12 +129,27 @@ namespace dmrender {
         VkMemoryRequirements requirements{};
         vkGetImageMemoryRequirements(logicalDevice, m_data->image, &requirements);
 
+        // Unlike a buffer, a render target has no useful host-visible fallback — a texture the
+        // GPU samples every frame has to be in device-local memory to be worth anything. So the
+        // capacity check reports the shortfall rather than quietly degrading.
+        const MemoryBudget budget = device->queryMemoryBudget();
+        if (budget.preciseBudget && budget.availableBytes() < requirements.size) {
+            vkDestroyImage(logicalDevice, m_data->image, nullptr);
+            m_data->image = VK_NULL_HANDLE;
+            throw std::runtime_error(
+                "VulkanImage: '" + debugName + "' needs " + std::to_string(requirements.size / 1024) +
+                " KiB of device-local memory but only " + std::to_string(budget.availableBytes() / 1024) +
+                " KiB is available");
+        }
+
+        VkMemoryPropertyFlags chosenFlags = 0;
         VkMemoryAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocInfo.allocationSize = requirements.size;
-        allocInfo.memoryTypeIndex = FindMemoryType(device->physicalDevice(),
-                                                   requirements.memoryTypeBits,
-                                                   VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocInfo.memoryTypeIndex = device->selectMemoryType(requirements.memoryTypeBits,
+                                                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                                             0,
+                                                             chosenFlags);
         VkCheck(vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &m_data->memory), "vkAllocateMemory");
         VkCheck(vkBindImageMemory(logicalDevice, m_data->image, m_data->memory, 0), "vkBindImageMemory");
 
@@ -176,6 +191,13 @@ namespace dmrender {
     ImageFormat VulkanImage::format() const { return m_data->format; }
     ImageType VulkanImage::type() const { return m_data->type; }
     ImageUsage VulkanImage::usage() const { return m_data->usage; }
+
+    MemoryLocation VulkanImage::memoryLocation() const
+    {
+        // Both cases are device-local: images this class allocates ask for DEVICE_LOCAL memory,
+        // and swapchain images are owned by the presentation engine, which keeps them in VRAM.
+        return MemoryLocation::DeviceLocal;
+    }
 
     void* VulkanImage::nativeHandle() const { return (void*)&m_data->image; }
 

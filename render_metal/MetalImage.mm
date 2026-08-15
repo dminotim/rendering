@@ -108,6 +108,12 @@ namespace dmrender {
         return m_usage;
     }
 
+    MemoryLocation MetalImage::memoryLocation() const {
+        // Textures this class allocates use MTLStorageModePrivate, and a drawable's texture is
+        // owned by the display system — both are GPU memory.
+        return MemoryLocation::DeviceLocal;
+    }
+
     void* MetalImage::nativeHandle() const {
         return (__bridge void*)m_texture;
     }

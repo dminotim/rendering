@@ -20,6 +20,15 @@ namespace dmrender {
         size_t size = 0;            ///< Logical size the caller asked for.
         VkDeviceSize regionStride = 0;  ///< Distance between two per-frame regions.
         uint32_t regionCount = 1;
+        MemoryLocation location = MemoryLocation::HostVisible;
+        /**
+         * Which region currently holds the newest complete contents.
+         *
+         * A partial write only touches the bytes it was given, so the region it lands in is
+         * only a valid snapshot if the *other* bytes were carried over from wherever the newest
+         * copy lives. This tracks where that is.
+         */
+        uint32_t latestRegion = 0;
         std::string debugName;
     };
 
@@ -39,6 +48,15 @@ namespace dmrender {
                     return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
             }
             return 0;
+        }
+
+        /// @brief True when a buffer with this usage hint belongs in device-local memory.
+        bool wantsDeviceLocal(BufferUsage usage)
+        {
+            // Only Static earns the staging copy: it is written once and read many times, so the
+            // one-off upload cost is repaid by every subsequent GPU read. Dynamic and Stream are
+            // rewritten by the CPU too often for that trade to pay off.
+            return usage == BufferUsage::Static;
         }
 
         VkDeviceSize alignUp(VkDeviceSize value, VkDeviceSize alignment)
@@ -73,10 +91,28 @@ namespace dmrender {
         if (type == BufferType::Vertex)  alignment = limits.minStorageBufferOffsetAlignment;
         m_data->regionStride = alignUp(static_cast<VkDeviceSize>(size), alignment);
 
+        const VkDeviceSize totalSize = m_data->regionStride * m_data->regionCount;
+
+        // Decide where this buffer should live before creating it, because a device-local buffer
+        // additionally needs TRANSFER_DST so the staging copy can target it.
+        bool placeInDeviceLocal = wantsDeviceLocal(usage);
+        if (placeInDeviceLocal) {
+            // The capacity check: if the allocation would not fit in what the driver says is
+            // still available, fall back to host-visible memory rather than failing outright.
+            // Rendering a little slower beats not rendering at all.
+            const MemoryBudget budget = device->queryMemoryBudget();
+            if (budget.preciseBudget && budget.availableBytes() < totalSize) {
+                placeInDeviceLocal = false;
+            }
+        }
+
         VkBufferCreateInfo bufferInfo{};
         bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-        bufferInfo.size = m_data->regionStride * m_data->regionCount;
+        bufferInfo.size = totalSize;
         bufferInfo.usage = toBufferUsage(type);
+        if (placeInDeviceLocal) {
+            bufferInfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        }
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
         VkDevice logicalDevice = device->logicalDevice();
@@ -85,24 +121,41 @@ namespace dmrender {
         VkMemoryRequirements requirements{};
         vkGetBufferMemoryRequirements(logicalDevice, m_data->buffer, &requirements);
 
+        // Ask for device-local, accept host-visible. On a discrete GPU the first choice wins and
+        // the memory is not CPU-addressable; on an integrated one the same type is often both,
+        // which the mapping check below turns into a free optimisation.
+        constexpr VkMemoryPropertyFlags kHostVisible =
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+
+        VkMemoryPropertyFlags chosenFlags = 0;
         VkMemoryAllocateInfo allocInfo{};
         allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
         allocInfo.allocationSize = requirements.size;
-        allocInfo.memoryTypeIndex = FindMemoryType(
-            device->physicalDevice(),
+        allocInfo.memoryTypeIndex = device->selectMemoryType(
             requirements.memoryTypeBits,
-            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            placeInDeviceLocal ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : kHostVisible,
+            kHostVisible,
+            chosenFlags);
 
         VkCheck(vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &m_data->memory), "vkAllocateMemory");
         VkCheck(vkBindBufferMemory(logicalDevice, m_data->buffer, m_data->memory, 0), "vkBindBufferMemory");
-        VkCheck(vkMapMemory(logicalDevice, m_data->memory, 0, VK_WHOLE_SIZE, 0, &m_data->mapped), "vkMapMemory");
+
+        m_data->location = (chosenFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+            ? MemoryLocation::DeviceLocal
+            : MemoryLocation::HostVisible;
+
+        // Map whenever the memory allows it, even when it is device-local: an integrated GPU or a
+        // resizable-BAR configuration can hand back memory that is both, and writing straight to
+        // it skips the staging copy entirely.
+        if (chosenFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+            VkCheck(vkMapMemory(logicalDevice, m_data->memory, 0, VK_WHOLE_SIZE, 0, &m_data->mapped),
+                    "vkMapMemory");
+        }
 
         if (initialData) {
             // Seed every region so a dynamic buffer is valid on all frame slots from the start.
             for (uint32_t region = 0; region < m_data->regionCount; ++region) {
-                std::memcpy(static_cast<char*>(m_data->mapped) + region * m_data->regionStride,
-                            initialData,
-                            size);
+                update(initialData, size, 0, region);
             }
         }
     }
@@ -125,15 +178,59 @@ namespace dmrender {
     BufferType VulkanBuffer::type() const { return m_data->type; }
     BufferUsage VulkanBuffer::usage() const { return m_data->usage; }
     size_t VulkanBuffer::size() const { return m_data->size; }
+    MemoryLocation VulkanBuffer::memoryLocation() const { return m_data->location; }
 
     void VulkanBuffer::update(const void* data, size_t dataSize, size_t offset)
+    {
+        if (m_data->regionCount <= 1) {
+            update(data, dataSize, offset, 0);
+            return;
+        }
+        update(data, dataSize, offset,
+               m_data->device->currentFrameSlot() % m_data->regionCount);
+    }
+
+    void VulkanBuffer::update(const void* data, size_t dataSize, size_t offset, uint32_t region)
     {
         if (!data || dataSize == 0) return;
         if (offset + dataSize > m_data->size) {
             throw std::runtime_error("VulkanBuffer::update: write is out of bounds");
         }
-        char* dst = static_cast<char*>(m_data->mapped) + currentRegionOffset() + offset;
-        std::memcpy(dst, data, dataSize);
+
+        const VkDeviceSize destinationOffset = m_data->regionStride * region + offset;
+
+        if (m_data->mapped) {
+            char* base = static_cast<char*>(m_data->mapped);
+
+            // A partial write leaves the rest of this region holding whatever it had two frames
+            // ago, which is not what the caller means by "update these bytes". Bring the region
+            // up to date from the newest copy first, so it becomes a complete snapshot that
+            // happens to differ in the bytes being written now.
+            //
+            // Skipped when the write covers the whole buffer (nothing to carry) and when this
+            // region already is the newest one (repeated updates within a frame).
+            const bool coversWholeBuffer = (offset == 0 && dataSize == m_data->size);
+            if (m_data->regionCount > 1 && !coversWholeBuffer && region != m_data->latestRegion) {
+                // Reading the other region while the GPU may be reading it too is safe — this
+                // only writes into the current frame's region, which the fence already guarded.
+                std::memcpy(base + m_data->regionStride * region,
+                            base + m_data->regionStride * m_data->latestRegion,
+                            m_data->size);
+            }
+
+            std::memcpy(base + destinationOffset, data, dataSize);
+            m_data->latestRegion = region;
+            return;
+        }
+
+        // Device-local memory with no CPU mapping: the bytes have to travel through a staging
+        // buffer and a GPU copy. This blocks until the copy completes, which is why the interface
+        // documents update() as slow and points frequently-updated data at BufferUsage::Dynamic.
+        //
+        // No region carry-over is needed here. Only BufferUsage::Dynamic allocates more than one
+        // region, and Dynamic always asks for host-visible memory, so an unmapped buffer is
+        // always single-region and a partial write into it is already complete.
+        m_data->device->uploadToDeviceLocalBuffer(m_data->buffer, destinationOffset, data, dataSize);
     }
 
     void* VulkanBuffer::nativeHandle() const
