@@ -34,12 +34,8 @@ public:
     ) override;
 
     std::shared_ptr<GImage> createImage(
-            ImageType type,
-            ImageFormat format,
-            uint32_t width,
-            uint32_t height,
-            ImageUsage usage,
-            const std::string& debugName
+            const ImageDesc& desc,
+            const void* initialData
     ) override;
 
     std::shared_ptr<GSampler> createSampler(
@@ -48,6 +44,8 @@ public:
     ) override;
 
     MemoryBudget queryMemoryBudget() const override;
+
+    SampleCount maxSupportedSampleCount() const override;
 
     /**
      * @brief Copies CPU data into a private-storage MTLBuffer through a staging buffer.
@@ -66,6 +64,64 @@ public:
                                size_t destinationOffset,
                                const void* data,
                                size_t size) const;
+
+    /**
+     * @brief Copies tightly packed pixels into one mip level of a private-storage MTLTexture.
+     *
+     * Same reasoning as uploadToPrivateBuffer: Private textures have no CPU-visible contents, so
+     * the pixels go through a shared staging buffer and a blit. Synchronous.
+     *
+     * @param destination The private MTLTexture to write into, as an id<MTLTexture>.
+     * @param width Width of this mip level in pixels.
+     * @param height Height of this mip level in pixels.
+     * @param mipLevel Which level to write.
+     * @param data Tightly packed pixels.
+     * @param size Size of @p data in bytes.
+     */
+    void uploadToPrivateTexture(void* destination,
+                                uint32_t width,
+                                uint32_t height,
+                                uint32_t mipLevel,
+                                const void* data,
+                                size_t size) const;
+
+    /**
+     * @brief Fills levels 1..n-1 of a texture from level 0.
+     *
+     * Metal exposes this directly on the blit encoder, so unlike the Vulkan path there is no
+     * per-level blit loop or layout dance to write out.
+     *
+     * @param texture The MTLTexture to fill, as an id<MTLTexture>.
+     */
+    void generateMipmapsForTexture(void* texture) const;
+
+    /**
+     * @brief Copies one mip level of a private-storage texture back into CPU memory.
+     * @param source The MTLTexture to read, as an id<MTLTexture>.
+     * @param width Width of this mip level in pixels.
+     * @param height Height of this mip level in pixels.
+     * @param mipLevel Which level to read.
+     * @param destination Buffer to fill with tightly packed pixels.
+     * @param size Number of bytes to read.
+     */
+    void readbackFromPrivateTexture(void* source,
+                                    uint32_t width,
+                                    uint32_t height,
+                                    uint32_t mipLevel,
+                                    void* destination,
+                                    size_t size) const;
+
+    /// @brief Copies a range of a private-storage buffer back into CPU memory.
+    void readbackFromPrivateBuffer(void* source,
+                                   size_t sourceOffset,
+                                   void* destination,
+                                   size_t size) const;
+
+private:
+    /// @brief Creates the transfer queue on first use and grows the staging buffer as needed.
+    void ensureTransferResources(size_t stagingSize) const;
+
+public:
 
     void* nativeHandle() const override;
 

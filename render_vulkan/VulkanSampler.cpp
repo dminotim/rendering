@@ -27,9 +27,11 @@ namespace dmrender {
         info.addressModeU = ToVkAddressMode(desc.addressU);
         info.addressModeV = ToVkAddressMode(desc.addressV);
         info.addressModeW = ToVkAddressMode(desc.addressW);
-        info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
-        info.minLod = 0.0f;
-        info.maxLod = 0.0f;
+        info.mipmapMode = (desc.mipFilter == SamplerFilter::Nearest)
+            ? VK_SAMPLER_MIPMAP_MODE_NEAREST
+            : VK_SAMPLER_MIPMAP_MODE_LINEAR;
+        info.minLod = desc.minLod;
+        info.maxLod = desc.maxLod;
         // Anisotropy is a device feature that has to be enabled at device creation; the
         // abstraction does not expose it, so it stays off on both backends.
         info.anisotropyEnable = VK_FALSE;

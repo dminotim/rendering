@@ -91,6 +91,88 @@ namespace dmrender {
     }
 
     /**
+     * @brief Bytes occupied by a single pixel of @p format.
+     * @return 0 for ImageFormat::Undefined.
+     * @note Every format the abstraction exposes is uncompressed and has a whole-byte pixel
+     *       size, so a row pitch is simply width * bytesPerPixel. Adding a block-compressed
+     *       format later would make this function insufficient on its own.
+     */
+    inline uint32_t bytesPerPixel(ImageFormat format) {
+        switch (format) {
+            case ImageFormat::RGBA8_UNORM:
+            case ImageFormat::BGRA8_UNORM:
+            case ImageFormat::R32_FLOAT:
+            case ImageFormat::D32_FLOAT:
+            case ImageFormat::D24_UNORM_S8_UINT:
+                return 4;
+            case ImageFormat::RGBA16_FLOAT:
+                return 8;
+            case ImageFormat::D16_UNORM:
+                return 2;
+            case ImageFormat::Undefined:
+            default:
+                return 0;
+        }
+    }
+
+    /// @brief Passed as ImageDesc::mipLevels to request a full mip chain down to 1x1.
+    inline constexpr uint32_t kFullMipChain = 0;
+
+    /**
+     * @enum SampleCount
+     * @brief How many samples per pixel an image stores, for multisample anti-aliasing.
+     *
+     * A multisampled image cannot be sampled by a shader and cannot have mip levels. It is
+     * written by a render pass and then *resolved* — averaged down to one sample per pixel —
+     * into an ordinary image, which is what later passes read. See
+     * RenderPassDescriptor::setResolveAttachment().
+     *
+     * Support beyond four samples varies; ask Device::maxSupportedSampleCount() rather than
+     * assuming.
+     */
+    enum class SampleCount : uint32_t {
+        One = 1,
+        Two = 2,
+        Four = 4,
+        Eight = 8,
+        Sixteen = 16
+    };
+
+    /**
+     * @struct ImageDesc
+     * @brief Everything needed to create a GImage.
+     *
+     * A struct rather than a parameter list because image creation has genuinely many knobs and
+     * most of them have sensible defaults; naming the ones that matter at each call site reads
+     * better than a row of positional arguments.
+     */
+    struct ImageDesc {
+        ImageType type = ImageType::Image2D;
+        ImageFormat format = ImageFormat::Undefined;
+        uint32_t width = 1;
+        uint32_t height = 1;
+
+        /**
+         * @brief Number of mip levels, or kFullMipChain for the complete chain down to 1x1.
+         *
+         * Levels beyond the first are generated on the GPU from level 0 when initial pixel data
+         * is supplied. Without initial data they are allocated but left undefined.
+         */
+        uint32_t mipLevels = 1;
+
+        /**
+         * @brief Samples per pixel. Anything above One makes this a multisample image.
+         *
+         * A multisample image must have exactly one mip level and must not be Sampled; it exists
+         * to be rendered into and then resolved.
+         */
+        SampleCount sampleCount = SampleCount::One;
+
+        ImageUsage usage = ImageUsage::Sampled;
+        std::string debugName;
+    };
+
+    /**
      * @class GImage
      * @brief An abstract interface for a GPU image or texture resource.
      *
@@ -114,6 +196,53 @@ namespace dmrender {
         virtual ImageFormat format() const = 0;
         virtual ImageType type() const = 0;
         virtual ImageUsage usage() const = 0;
+
+        /// @brief Samples per pixel; SampleCount::One for an ordinary image.
+        virtual SampleCount sampleCount() const = 0;
+
+        /**
+         * @brief Replaces the contents of one mip level from CPU memory.
+         *
+         * The data must be tightly packed: `width * bytesPerPixel(format())` bytes per row, with
+         * dimensions halved (rounding down, minimum 1) for each level below zero.
+         *
+         * @param data Tightly packed pixels for the whole level.
+         * @param dataSize Size of @p data in bytes; must match the level exactly.
+         * @param mipLevel Which level to replace.
+         *
+         * @note Uploading level 0 does *not* refresh the other levels. Call
+         *       generateMipmaps() afterwards if the image has a chain.
+         * @note Synchronous: the upload is submitted and waited on before returning.
+         */
+        virtual void update(const void* data, size_t dataSize, uint32_t mipLevel = 0) = 0;
+
+        /**
+         * @brief Fills levels 1..mipLevels()-1 by successively downsampling level 0 on the GPU.
+         *
+         * Does nothing on an image with a single level. Requires the format to support linear
+         * filtering, which every format this abstraction exposes does on both backends.
+         */
+        virtual void generateMipmaps() = 0;
+
+        /**
+         * @brief Copies one mip level back into CPU memory.
+         *
+         * The counterpart of update(), and the basis for screenshots, GPU picking, and comparing
+         * rendered output against a reference in a test.
+         *
+         * @param destination Buffer to fill; receives tightly packed pixels.
+         * @param destinationSize Size of @p destination in bytes; must match the level exactly.
+         * @param mipLevel Which level to read.
+         *
+         * @pre The image must have been created with ImageUsage::TransferSrc.
+         *
+         * @note Synchronous and slow by nature: it waits for the GPU to finish, copies through a
+         *       staging buffer, and waits again. It is a debugging and tooling facility, not
+         *       something to do per frame.
+         * @note A multisample image cannot be read back. Resolve it first and read the resolve
+         *       target.
+         */
+        virtual void readback(void* destination, size_t destinationSize, uint32_t mipLevel = 0) = 0;
 
         /**
          * @brief Reports where this image's memory actually landed.

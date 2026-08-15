@@ -57,11 +57,7 @@ namespace dmrender {
      */
     class VulkanPipeline : public Pipeline {
     public:
-        VulkanPipeline(const std::shared_ptr<Device>& device,
-                       const std::shared_ptr<ShaderFunction>& vertexFunction,
-                       const std::shared_ptr<ShaderFunction>& fragmentFunction,
-                       const RenderTargetFormat& targetFormat,
-                       const std::string& debugName = "");
+        VulkanPipeline(const std::shared_ptr<Device>& device, const PipelineDesc& desc);
 
         ~VulkanPipeline() override;
 

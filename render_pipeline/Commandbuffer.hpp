@@ -13,6 +13,23 @@
 namespace dmrender {
 
     /**
+     * @brief Largest push constant block the abstraction guarantees.
+     *
+     * Vulkan only promises 128 bytes of push constant space; asking for more works on most
+     * desktop hardware but is not portable, so the abstraction commits to the guaranteed minimum.
+     */
+    inline constexpr size_t kMaxPushConstantBytes = 128;
+
+    /**
+     * @brief Metal buffer index reserved for push constant data.
+     *
+     * Metal has no push constants; the equivalent is `setVertexBytes:`/`setFragmentBytes:`, which
+     * still target a buffer slot. Reserving the slot just past the uniform range keeps it clear
+     * of anything setUniformBuffer() might bind.
+     */
+    inline constexpr uint32_t kPushConstantBufferSlot = 8;
+
+    /**
      * @enum ShaderStage
      * @brief Defines the programmable stages in the graphics pipeline.
      */
@@ -93,6 +110,31 @@ namespace dmrender {
                                 ShaderStage stage,
                                 const std::shared_ptr<GImage>& image,
                                 const std::shared_ptr<GSampler>& sampler) = 0;
+
+        /**
+         * @brief Writes a small block of data straight into the command stream.
+         *
+         * The cheapest way to give a draw call its own parameters. Nothing is allocated, no
+         * descriptor is written and no buffer is bound — the bytes travel inside the command
+         * buffer itself, which makes this the right home for per-draw values like a transform,
+         * a material index or a colour tint. A uniform buffer remains the right home for data
+         * shared across many draws.
+         *
+         * @pre A render pass and a pipeline must be active.
+         * @param stage Which shader stages read the data.
+         * @param data The bytes to write.
+         * @param size Size of @p data in bytes; must not exceed kMaxPushConstantBytes.
+         * @param offset Byte offset within the push constant block.
+         *
+         * @note The two backends express this differently in shader source, which is the one
+         *       place they diverge: GLSL declares `layout(push_constant) uniform`, while MSL
+         *       receives an ordinary constant reference at buffer index kPushConstantBufferSlot.
+         *       The C++ call is identical either way.
+         */
+        virtual void setPushConstants(ShaderStage stage,
+                                      const void* data,
+                                      size_t size,
+                                      size_t offset = 0) = 0;
 
         /**
          * @brief Records a non-indexed drawing command.

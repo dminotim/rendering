@@ -100,15 +100,25 @@ namespace dmrender
         }
 
         std::shared_ptr<Pipeline> createPipeline(const std::shared_ptr<Device>& device,
+                                                 const PipelineDesc& desc)
+        {
+            #if defined(__APPLE__)
+                return std::make_shared<MetalPipeline>(device, desc);
+            #else
+                return std::make_shared<VulkanPipeline>(device, desc);
+            #endif
+        }
+
+        std::shared_ptr<Pipeline> createPipeline(const std::shared_ptr<Device>& device,
                                                  const std::shared_ptr<ShaderFunction>& vertexFunction,
                                                  const std::shared_ptr<ShaderFunction>& fragmentFunction,
                                                  const RenderTargetFormat& targetFormat)
         {
-            #if defined(__APPLE__)
-                return std::make_shared<MetalPipeline>(device, vertexFunction, fragmentFunction, targetFormat);
-            #else
-                return std::make_shared<VulkanPipeline>(device, vertexFunction, fragmentFunction, targetFormat);
-            #endif
+            PipelineDesc desc{};
+            desc.vertexFunction = vertexFunction;
+            desc.fragmentFunction = fragmentFunction;
+            desc.targetFormat = targetFormat;
+            return createPipeline(device, desc);
         }
 
         std::shared_ptr<RenderPassDescriptor> createRenderPassDescriptor()

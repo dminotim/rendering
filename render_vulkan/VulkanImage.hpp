@@ -51,13 +51,7 @@ namespace dmrender {
                     const std::string& debugName = "");
 
         /// @brief Creates and owns an offscreen image, its memory and its view.
-        VulkanImage(VulkanDevice* device,
-                    ImageType type,
-                    ImageFormat format,
-                    uint32_t width,
-                    uint32_t height,
-                    ImageUsage usage,
-                    const std::string& debugName);
+        VulkanImage(VulkanDevice* device, const ImageDesc& desc, const void* initialData);
 
         ~VulkanImage() override;
 
@@ -68,7 +62,12 @@ namespace dmrender {
         ImageFormat format() const override;
         ImageType type() const override;
         ImageUsage usage() const override;
+        SampleCount sampleCount() const override;
         MemoryLocation memoryLocation() const override;
+
+        void update(const void* data, size_t dataSize, uint32_t mipLevel = 0) override;
+        void generateMipmaps() override;
+        void readback(void* destination, size_t destinationSize, uint32_t mipLevel = 0) override;
 
         /// @return Pointer to the VkImage handle.
         void* nativeHandle() const override;

@@ -12,7 +12,7 @@ namespace dmrender {
     {
         VulkanDevice* device = nullptr;
         VkBuffer buffer = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VulkanAllocation allocation{};
         void* mapped = nullptr;
 
         BufferType type = BufferType::Vertex;
@@ -111,7 +111,9 @@ namespace dmrender {
         bufferInfo.size = totalSize;
         bufferInfo.usage = toBufferUsage(type);
         if (placeInDeviceLocal) {
-            bufferInfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+            // DST so staging can write it, SRC so readback() can read it. Neither is expressible
+            // through BufferType, and both are cheap to always allow.
+            bufferInfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         }
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
@@ -128,29 +130,29 @@ namespace dmrender {
             VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
 
         VkMemoryPropertyFlags chosenFlags = 0;
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = requirements.size;
-        allocInfo.memoryTypeIndex = device->selectMemoryType(
+        const uint32_t memoryTypeIndex = device->selectMemoryType(
             requirements.memoryTypeBits,
             placeInDeviceLocal ? VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT : kHostVisible,
             kHostVisible,
             chosenFlags);
 
-        VkCheck(vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &m_data->memory), "vkAllocateMemory");
-        VkCheck(vkBindBufferMemory(logicalDevice, m_data->buffer, m_data->memory, 0), "vkBindBufferMemory");
+        // A buffer is linear-tiled, so it comes from a linear pool and can never end up adjacent
+        // to an image inside the same block.
+        m_data->allocation = device->allocator().allocate(
+            requirements, memoryTypeIndex, VulkanMemoryAllocator::ResourceKind::Linear);
+        VkCheck(vkBindBufferMemory(logicalDevice, m_data->buffer,
+                                   m_data->allocation.memory, m_data->allocation.offset),
+                "vkBindBufferMemory");
 
         m_data->location = (chosenFlags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
             ? MemoryLocation::DeviceLocal
             : MemoryLocation::HostVisible;
 
-        // Map whenever the memory allows it, even when it is device-local: an integrated GPU or a
-        // resizable-BAR configuration can hand back memory that is both, and writing straight to
-        // it skips the staging copy entirely.
-        if (chosenFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-            VkCheck(vkMapMemory(logicalDevice, m_data->memory, 0, VK_WHOLE_SIZE, 0, &m_data->mapped),
-                    "vkMapMemory");
-        }
+        // The allocator maps whole host-visible blocks once and hands back a pointer already
+        // offset to this allocation, so there is nothing to map here. Device-local memory that
+        // is also host-visible — integrated GPUs, resizable BAR — arrives mapped too, which
+        // skips the staging copy entirely.
+        m_data->mapped = m_data->allocation.mapped;
 
         if (initialData) {
             // Seed every region so a dynamic buffer is valid on all frame slots from the start.
@@ -167,12 +169,10 @@ namespace dmrender {
         // Vulkan does not, so make sure no in-flight frame is still reading this memory.
         vkDeviceWaitIdle(logicalDevice);
 
-        if (m_data->mapped) {
-            vkUnmapMemory(logicalDevice, m_data->memory);
-            m_data->mapped = nullptr;
-        }
+        // The mapping belongs to the allocator's block, so it is not unmapped here.
+        m_data->mapped = nullptr;
         if (m_data->buffer) vkDestroyBuffer(logicalDevice, m_data->buffer, nullptr);
-        if (m_data->memory) vkFreeMemory(logicalDevice, m_data->memory, nullptr);
+        if (m_data->allocation.isValid()) m_data->device->allocator().free(m_data->allocation);
     }
 
     BufferType VulkanBuffer::type() const { return m_data->type; }
@@ -231,6 +231,26 @@ namespace dmrender {
         // region, and Dynamic always asks for host-visible memory, so an unmapped buffer is
         // always single-region and a partial write into it is already complete.
         m_data->device->uploadToDeviceLocalBuffer(m_data->buffer, destinationOffset, data, dataSize);
+    }
+
+    void VulkanBuffer::readback(void* destination, size_t destinationSize, size_t offset)
+    {
+        if (!destination || destinationSize == 0) return;
+        if (offset + destinationSize > m_data->size) {
+            throw std::runtime_error("VulkanBuffer::readback: read is out of bounds");
+        }
+
+        // Reads come from the region holding the newest contents, not blindly from region zero,
+        // so a dynamic buffer reads back what the application last wrote.
+        const VkDeviceSize sourceOffset = m_data->regionStride * m_data->latestRegion + offset;
+
+        if (m_data->mapped) {
+            std::memcpy(destination, static_cast<const char*>(m_data->mapped) + sourceOffset,
+                        destinationSize);
+            return;
+        }
+
+        m_data->device->readbackFromBuffer(m_data->buffer, sourceOffset, destination, destinationSize);
     }
 
     void* VulkanBuffer::nativeHandle() const

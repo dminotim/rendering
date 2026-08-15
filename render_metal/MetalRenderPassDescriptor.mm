@@ -50,6 +50,23 @@ namespace dmrender {
         return m_data->m_colorCount;
     }
 
+    void MetalRenderPassDescriptor::setResolveAttachment(uint32_t index,
+                                                         const std::shared_ptr<GImage>& resolveImage) {
+        if (index >= kMaxColorAttachments) {
+            NSLog(@"[ERROR] MetalRenderPassDescriptor: resolve attachment index is out of range");
+            return;
+        }
+        if (!resolveImage) return;
+
+        auto* attachment = m_data->m_pass.colorAttachments[index];
+        auto* metalImage = static_cast<MetalImage*>(resolveImage.get());
+
+        attachment.resolveTexture = (__bridge id<MTLTexture>)metalImage->nativeHandle();
+        // MultisampleResolve averages the samples into resolveTexture and discards the samples
+        // themselves, which is what Vulkan's DONT_CARE store op on a resolving attachment does.
+        attachment.storeAction = MTLStoreActionMultisampleResolve;
+    }
+
     void MetalRenderPassDescriptor::setDepthStencilAttachment(const std::shared_ptr<GImage>& image,
                                                               bool clearDepth,
                                                               float depthValue,

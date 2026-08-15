@@ -36,14 +36,8 @@ namespace dmrender {
                             ImageType type,
                             const std::string &debugName = "");
 
-        /// @brief Creates and owns an offscreen texture.
-        MetalImage(Device* device,
-                   ImageType type,
-                   ImageFormat format,
-                   uint32_t width,
-                   uint32_t height,
-                   ImageUsage usage,
-                   const std::string& debugName);
+        /// @brief Creates and owns a texture, optionally filling it from CPU pixels.
+        MetalImage(Device* device, const ImageDesc& desc, const void* initialData);
 
         ~MetalImage() override;
 
@@ -61,7 +55,15 @@ namespace dmrender {
 
         ImageUsage usage() const override;
 
+        SampleCount sampleCount() const override;
+
         MemoryLocation memoryLocation() const override;
+
+        void update(const void *data, size_t dataSize, uint32_t mipLevel = 0) override;
+
+        void generateMipmaps() override;
+
+        void readback(void *destination, size_t destinationSize, uint32_t mipLevel = 0) override;
 
         void *nativeHandle() const override;
 
@@ -78,6 +80,9 @@ namespace dmrender {
         ImageFormat m_format;
         ImageUsage m_usage;
         ImageType m_type;
+        uint32_t m_mipLevels = 1;
+        SampleCount m_sampleCount = SampleCount::One;
+        Device* m_device = nullptr;   ///< Set only for textures this object owns.
         std::string m_debugName;
     };
 }

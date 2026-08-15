@@ -74,6 +74,121 @@ namespace dmrender {
         return (filter == SamplerFilter::Nearest) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
     }
 
+    VkSampleCountFlagBits ToVkSampleCount(SampleCount samples)
+    {
+        switch (samples) {
+            case SampleCount::Two:     return VK_SAMPLE_COUNT_2_BIT;
+            case SampleCount::Four:    return VK_SAMPLE_COUNT_4_BIT;
+            case SampleCount::Eight:   return VK_SAMPLE_COUNT_8_BIT;
+            case SampleCount::Sixteen: return VK_SAMPLE_COUNT_16_BIT;
+            case SampleCount::One:
+            default:                   return VK_SAMPLE_COUNT_1_BIT;
+        }
+    }
+
+    VkCompareOp ToVkCompareOp(CompareOp op)
+    {
+        switch (op) {
+            case CompareOp::Never:          return VK_COMPARE_OP_NEVER;
+            case CompareOp::Less:           return VK_COMPARE_OP_LESS;
+            case CompareOp::Equal:          return VK_COMPARE_OP_EQUAL;
+            case CompareOp::LessOrEqual:    return VK_COMPARE_OP_LESS_OR_EQUAL;
+            case CompareOp::Greater:        return VK_COMPARE_OP_GREATER;
+            case CompareOp::NotEqual:       return VK_COMPARE_OP_NOT_EQUAL;
+            case CompareOp::GreaterOrEqual: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+            case CompareOp::Always:
+            default:                        return VK_COMPARE_OP_ALWAYS;
+        }
+    }
+
+    VkStencilOp ToVkStencilOp(StencilOp op)
+    {
+        switch (op) {
+            case StencilOp::Keep:           return VK_STENCIL_OP_KEEP;
+            case StencilOp::Zero:           return VK_STENCIL_OP_ZERO;
+            case StencilOp::Replace:        return VK_STENCIL_OP_REPLACE;
+            case StencilOp::IncrementClamp: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+            case StencilOp::DecrementClamp: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+            case StencilOp::Invert:         return VK_STENCIL_OP_INVERT;
+            case StencilOp::IncrementWrap:  return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+            case StencilOp::DecrementWrap:  return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+            default:                        return VK_STENCIL_OP_KEEP;
+        }
+    }
+
+    VkBlendFactor ToVkBlendFactor(BlendFactor factor)
+    {
+        switch (factor) {
+            case BlendFactor::Zero:             return VK_BLEND_FACTOR_ZERO;
+            case BlendFactor::One:              return VK_BLEND_FACTOR_ONE;
+            case BlendFactor::SrcColor:         return VK_BLEND_FACTOR_SRC_COLOR;
+            case BlendFactor::OneMinusSrcColor: return VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR;
+            case BlendFactor::DstColor:         return VK_BLEND_FACTOR_DST_COLOR;
+            case BlendFactor::OneMinusDstColor: return VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR;
+            case BlendFactor::SrcAlpha:         return VK_BLEND_FACTOR_SRC_ALPHA;
+            case BlendFactor::OneMinusSrcAlpha: return VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            case BlendFactor::DstAlpha:         return VK_BLEND_FACTOR_DST_ALPHA;
+            case BlendFactor::OneMinusDstAlpha: return VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA;
+            default:                            return VK_BLEND_FACTOR_ONE;
+        }
+    }
+
+    VkBlendOp ToVkBlendOp(BlendOp op)
+    {
+        switch (op) {
+            case BlendOp::Add:             return VK_BLEND_OP_ADD;
+            case BlendOp::Subtract:        return VK_BLEND_OP_SUBTRACT;
+            case BlendOp::ReverseSubtract: return VK_BLEND_OP_REVERSE_SUBTRACT;
+            case BlendOp::Min:             return VK_BLEND_OP_MIN;
+            case BlendOp::Max:             return VK_BLEND_OP_MAX;
+            default:                       return VK_BLEND_OP_ADD;
+        }
+    }
+
+    VkColorComponentFlags ToVkColorComponents(ColorComponent mask)
+    {
+        VkColorComponentFlags flags = 0;
+        if (hasFlag(mask, ColorComponent::R)) flags |= VK_COLOR_COMPONENT_R_BIT;
+        if (hasFlag(mask, ColorComponent::G)) flags |= VK_COLOR_COMPONENT_G_BIT;
+        if (hasFlag(mask, ColorComponent::B)) flags |= VK_COLOR_COMPONENT_B_BIT;
+        if (hasFlag(mask, ColorComponent::A)) flags |= VK_COLOR_COMPONENT_A_BIT;
+        return flags;
+    }
+
+    VkCullModeFlags ToVkCullMode(CullMode mode)
+    {
+        switch (mode) {
+            case CullMode::Front: return VK_CULL_MODE_FRONT_BIT;
+            case CullMode::Back:  return VK_CULL_MODE_BACK_BIT;
+            case CullMode::None:
+            default:              return VK_CULL_MODE_NONE;
+        }
+    }
+
+    VkFrontFace ToVkFrontFace(FrontFace face)
+    {
+        return (face == FrontFace::Clockwise) ? VK_FRONT_FACE_CLOCKWISE
+                                              : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    }
+
+    VkPolygonMode ToVkPolygonMode(PolygonMode mode)
+    {
+        return (mode == PolygonMode::Line) ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+    }
+
+    VkStencilOpState ToVkStencilOpState(const StencilOpState& state)
+    {
+        VkStencilOpState result{};
+        result.failOp = ToVkStencilOp(state.failOp);
+        result.passOp = ToVkStencilOp(state.passOp);
+        result.depthFailOp = ToVkStencilOp(state.depthFailOp);
+        result.compareOp = ToVkCompareOp(state.compareOp);
+        result.compareMask = state.compareMask;
+        result.writeMask = state.writeMask;
+        result.reference = state.reference;
+        return result;
+    }
+
     VkSamplerAddressMode ToVkAddressMode(SamplerAddressMode mode)
     {
         switch (mode) {

@@ -24,6 +24,7 @@ namespace dmrender {
         VkPhysicalDeviceProperties properties{};
         VkPhysicalDeviceMemoryProperties memoryProperties{};
         bool memoryBudgetExtension = false;
+        std::unique_ptr<VulkanMemoryAllocator> allocator;
 
         // --- Transfer context: everything needed to push data into device-local memory ---
         VkQueue transferQueue = VK_NULL_HANDLE;   ///< Same queue the graphics work uses.
@@ -32,8 +33,7 @@ namespace dmrender {
         VkFence transferFence = VK_NULL_HANDLE;
         /// Reused across uploads and grown on demand, so repeated uploads do not re-allocate.
         VkBuffer stagingBuffer = VK_NULL_HANDLE;
-        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
-        void* stagingMapped = nullptr;
+        VulkanAllocation stagingAllocation{};
         VkDeviceSize stagingCapacity = 0;
 
         /// @brief Render passes are immutable and cheap to share, so they are cached forever.
@@ -45,12 +45,14 @@ namespace dmrender {
 
     bool RenderPassAttachmentKey::operator<(const RenderPassAttachmentKey& other) const
     {
-        return std::tie(format, clear, restingLayout) <
-               std::tie(other.format, other.clear, other.restingLayout);
+        return std::tie(format, clear, restingLayout, hasResolve, resolveRestingLayout) <
+               std::tie(other.format, other.clear, other.restingLayout,
+                        other.hasResolve, other.resolveRestingLayout);
     }
 
     bool RenderPassKey::operator<(const RenderPassKey& other) const
     {
+        if (samples != other.samples) return samples < other.samples;
         if (colors.size() != other.colors.size()) return colors.size() < other.colors.size();
         for (size_t i = 0; i < colors.size(); ++i) {
             if (colors[i] < other.colors[i]) return true;
@@ -247,9 +249,8 @@ namespace dmrender {
 
         vkDeviceWaitIdle(m_data->device);
 
-        if (m_data->stagingMapped) vkUnmapMemory(m_data->device, m_data->stagingMemory);
         if (m_data->stagingBuffer) vkDestroyBuffer(m_data->device, m_data->stagingBuffer, nullptr);
-        if (m_data->stagingMemory) vkFreeMemory(m_data->device, m_data->stagingMemory, nullptr);
+        if (m_data->stagingAllocation.isValid()) m_data->allocator->free(m_data->stagingAllocation);
         if (m_data->transferFence) vkDestroyFence(m_data->device, m_data->transferFence, nullptr);
         // Destroying the pool frees the transfer command buffer allocated from it.
         if (m_data->transferPool) vkDestroyCommandPool(m_data->device, m_data->transferPool, nullptr);
@@ -331,10 +332,15 @@ namespace dmrender {
             throw std::runtime_error("acquireRenderPass: a render pass needs at least one colour attachment");
         }
 
+        // Attachment indices are laid out colours first, then resolve targets, then depth. The
+        // framebuffer's image views must be supplied in exactly that order.
         std::vector<VkAttachmentDescription> attachments;
         std::vector<VkAttachmentReference> colorRefs;
-        attachments.reserve(key.colors.size() + 1);
+        std::vector<VkAttachmentReference> resolveRefs;
+        attachments.reserve(key.colors.size() * 2 + 1);
         colorRefs.reserve(key.colors.size());
+
+        const bool multisampled = key.samples != VK_SAMPLE_COUNT_1_BIT;
 
         // One description per colour attachment. Each carries its own resting layout, so a pass
         // writing a swapchain image alongside an offscreen texture ends with the first in
@@ -342,15 +348,20 @@ namespace dmrender {
         for (const RenderPassAttachmentKey& color : key.colors) {
             VkAttachmentDescription description{};
             description.format = color.format;
-            description.samples = VK_SAMPLE_COUNT_1_BIT;
+            description.samples = key.samples;
             description.loadOp = color.clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-            description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            // A multisampled attachment that resolves is pure scratch: only the resolved result
+            // is ever read, so discarding the samples lets tilers skip writing them out at all.
+            description.storeOp = color.hasResolve ? VK_ATTACHMENT_STORE_OP_DONT_CARE
+                                                   : VK_ATTACHMENT_STORE_OP_STORE;
             description.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
             description.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
             // Clearing discards whatever was there, so the previous layout does not matter and
             // UNDEFINED lets the driver skip a decompress.
             description.initialLayout = color.clear ? VK_IMAGE_LAYOUT_UNDEFINED : color.restingLayout;
-            description.finalLayout = color.restingLayout;
+            description.finalLayout = color.hasResolve
+                ? VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL
+                : color.restingLayout;
 
             VkAttachmentReference ref{};
             ref.attachment = static_cast<uint32_t>(attachments.size());
@@ -360,12 +371,47 @@ namespace dmrender {
             colorRefs.push_back(ref);
         }
 
+        // Resolve targets are single-sample no matter what the colour attachments are, and they
+        // are the images that end up in a readable resting layout.
+        if (multisampled) {
+            resolveRefs.reserve(key.colors.size());
+            for (const RenderPassAttachmentKey& color : key.colors) {
+                VkAttachmentReference ref{};
+                if (!color.hasResolve) {
+                    // A pass may resolve some attachments and not others.
+                    ref.attachment = VK_ATTACHMENT_UNUSED;
+                    ref.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+                    resolveRefs.push_back(ref);
+                    continue;
+                }
+
+                VkAttachmentDescription description{};
+                description.format = color.format;
+                description.samples = VK_SAMPLE_COUNT_1_BIT;
+                // The resolve overwrites every pixel, so nothing needs loading.
+                description.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+                description.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+                description.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+                description.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+                description.finalLayout = color.resolveRestingLayout;
+
+                ref.attachment = static_cast<uint32_t>(attachments.size());
+                ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+                attachments.push_back(description);
+                resolveRefs.push_back(ref);
+            }
+        }
+
         VkAttachmentReference depthRef{};
         const bool hasDepth = key.depth.format != VK_FORMAT_UNDEFINED;
         if (hasDepth) {
             VkAttachmentDescription description{};
             description.format = key.depth.format;
-            description.samples = VK_SAMPLE_COUNT_1_BIT;
+            // Depth must match the colour attachments' sample count. It is not resolved: nothing
+            // in this abstraction reads depth back, and resolving it needs an extension.
+            description.samples = key.samples;
             description.loadOp = key.depth.clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
             description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
             description.stencilLoadOp = key.depth.clear ? VK_ATTACHMENT_LOAD_OP_CLEAR
@@ -383,6 +429,9 @@ namespace dmrender {
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
         subpass.colorAttachmentCount = static_cast<uint32_t>(colorRefs.size());
         subpass.pColorAttachments = colorRefs.data();
+        // pResolveAttachments is parallel to pColorAttachments; the driver performs the resolve
+        // when the subpass ends, which is why MSAA costs no extra draw call here.
+        subpass.pResolveAttachments = resolveRefs.empty() ? nullptr : resolveRefs.data();
         subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
 
         // Two external dependencies bracket the subpass, and between them they remove the need
@@ -476,15 +525,9 @@ namespace dmrender {
         }
     }
 
-    std::shared_ptr<GImage> VulkanDevice::createImage(
-        ImageType type,
-        ImageFormat format,
-        uint32_t width,
-        uint32_t height,
-        ImageUsage usage,
-        const std::string& debugName)
+    std::shared_ptr<GImage> VulkanDevice::createImage(const ImageDesc& desc, const void* initialData)
     {
-        return std::make_shared<VulkanImage>(this, type, format, width, height, usage, debugName);
+        return std::make_shared<VulkanImage>(this, desc, initialData);
     }
 
     std::shared_ptr<GSampler> VulkanDevice::createSampler(
@@ -497,6 +540,11 @@ namespace dmrender {
     bool VulkanDevice::hasMemoryBudgetExtension() const
     {
         return m_data->memoryBudgetExtension;
+    }
+
+    VulkanMemoryAllocator& VulkanDevice::allocator() const
+    {
+        return *m_data->allocator;
     }
 
     MemoryBudget VulkanDevice::queryMemoryBudget() const
@@ -552,7 +600,26 @@ namespace dmrender {
         budget.unifiedMemory = sawHostVisibleDeviceLocal &&
                                m_data->properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
 
+        const VulkanMemoryAllocator::Stats allocatorStats = m_data->allocator->stats();
+        budget.nativeAllocationCount = allocatorStats.blockCount + allocatorStats.dedicatedCount;
+        budget.reservedBytes = allocatorStats.reservedBytes;
+
         return budget;
+    }
+
+    SampleCount VulkanDevice::maxSupportedSampleCount() const
+    {
+        // A pass writes colour and (optionally) depth at the same rate, so only counts both
+        // support are usable.
+        const VkSampleCountFlags supported =
+            m_data->properties.limits.framebufferColorSampleCounts &
+            m_data->properties.limits.framebufferDepthSampleCounts;
+
+        if (supported & VK_SAMPLE_COUNT_16_BIT) return SampleCount::Sixteen;
+        if (supported & VK_SAMPLE_COUNT_8_BIT)  return SampleCount::Eight;
+        if (supported & VK_SAMPLE_COUNT_4_BIT)  return SampleCount::Four;
+        if (supported & VK_SAMPLE_COUNT_2_BIT)  return SampleCount::Two;
+        return SampleCount::One;
     }
 
     uint32_t VulkanDevice::selectMemoryType(uint32_t typeBits,
@@ -575,6 +642,43 @@ namespace dmrender {
         throw std::runtime_error("selectMemoryType: no memory type satisfies the requested properties");
     }
 
+    void VulkanDevice::ensureStagingCapacity(VkDeviceSize size)
+    {
+        if (size <= m_data->stagingCapacity) return;
+
+        if (m_data->stagingBuffer) vkDestroyBuffer(m_data->device, m_data->stagingBuffer, nullptr);
+        if (m_data->stagingAllocation.isValid()) m_data->allocator->free(m_data->stagingAllocation);
+        m_data->stagingBuffer = VK_NULL_HANDLE;
+        m_data->stagingAllocation = VulkanAllocation{};
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = size;
+        // Source for uploads, destination for readbacks — the same buffer serves both directions.
+        bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        VkCheck(vkCreateBuffer(m_data->device, &bufferInfo, nullptr, &m_data->stagingBuffer),
+                "vkCreateBuffer (staging)");
+
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(m_data->device, m_data->stagingBuffer, &requirements);
+
+        VkMemoryPropertyFlags chosenFlags = 0;
+        const uint32_t memoryTypeIndex = selectMemoryType(
+            requirements.memoryTypeBits,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+            chosenFlags);
+
+        m_data->stagingAllocation = m_data->allocator->allocate(
+            requirements, memoryTypeIndex, VulkanMemoryAllocator::ResourceKind::Linear);
+        VkCheck(vkBindBufferMemory(m_data->device, m_data->stagingBuffer,
+                                   m_data->stagingAllocation.memory, m_data->stagingAllocation.offset),
+                "vkBindBufferMemory (staging)");
+
+        m_data->stagingCapacity = requirements.size;
+    }
+
     void VulkanDevice::uploadToDeviceLocalBuffer(VkBuffer destination,
                                                  VkDeviceSize destinationOffset,
                                                  const void* data,
@@ -584,60 +688,17 @@ namespace dmrender {
 
         // Grow the shared staging buffer if this upload does not fit. Uploads are rare and their
         // sizes cluster, so one buffer that reaches a high-water mark beats allocating per call.
-        if (size > m_data->stagingCapacity) {
-            if (m_data->stagingMapped) {
-                vkUnmapMemory(m_data->device, m_data->stagingMemory);
-                m_data->stagingMapped = nullptr;
-            }
-            if (m_data->stagingBuffer) vkDestroyBuffer(m_data->device, m_data->stagingBuffer, nullptr);
-            if (m_data->stagingMemory) vkFreeMemory(m_data->device, m_data->stagingMemory, nullptr);
-            m_data->stagingBuffer = VK_NULL_HANDLE;
-            m_data->stagingMemory = VK_NULL_HANDLE;
+        ensureStagingCapacity(size);
+        std::memcpy(m_data->stagingAllocation.mapped, data, static_cast<size_t>(size));
 
-            VkBufferCreateInfo bufferInfo{};
-            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-            bufferInfo.size = size;
-            bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-            VkCheck(vkCreateBuffer(m_data->device, &bufferInfo, nullptr, &m_data->stagingBuffer),
-                    "vkCreateBuffer (staging)");
-
-            VkMemoryRequirements requirements{};
-            vkGetBufferMemoryRequirements(m_data->device, m_data->stagingBuffer, &requirements);
-
-            VkMemoryPropertyFlags chosenFlags = 0;
-            VkMemoryAllocateInfo allocInfo{};
-            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-            allocInfo.allocationSize = requirements.size;
-            allocInfo.memoryTypeIndex = selectMemoryType(
-                requirements.memoryTypeBits,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-                chosenFlags);
-            VkCheck(vkAllocateMemory(m_data->device, &allocInfo, nullptr, &m_data->stagingMemory),
-                    "vkAllocateMemory (staging)");
-            VkCheck(vkBindBufferMemory(m_data->device, m_data->stagingBuffer, m_data->stagingMemory, 0),
-                    "vkBindBufferMemory (staging)");
-            VkCheck(vkMapMemory(m_data->device, m_data->stagingMemory, 0, VK_WHOLE_SIZE, 0, &m_data->stagingMapped),
-                    "vkMapMemory (staging)");
-
-            m_data->stagingCapacity = requirements.size;
-        }
-
-        std::memcpy(m_data->stagingMapped, data, static_cast<size_t>(size));
-
-        VkCheck(vkResetCommandBuffer(m_data->transferCmd, 0), "vkResetCommandBuffer (transfer)");
-
-        VkCommandBufferBeginInfo beginInfo{};
-        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-        VkCheck(vkBeginCommandBuffer(m_data->transferCmd, &beginInfo), "vkBeginCommandBuffer (transfer)");
+        beginTransferCommands();
 
         VkBufferCopy region{};
         region.srcOffset = 0;
         region.dstOffset = destinationOffset;
         region.size = size;
         vkCmdCopyBuffer(m_data->transferCmd, m_data->stagingBuffer, destination, 1, &region);
+
 
         // Make the copy visible to every stage that might read the buffer afterwards. A single
         // barrier here is cheaper than reasoning about which one this particular buffer needs.
@@ -652,6 +713,22 @@ namespace dmrender {
                              VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                              0, 1, &barrier, 0, nullptr, 0, nullptr);
 
+        endTransferCommands();
+    }
+
+    VkCommandBuffer VulkanDevice::beginTransferCommands()
+    {
+        VkCheck(vkResetCommandBuffer(m_data->transferCmd, 0), "vkResetCommandBuffer (transfer)");
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkCheck(vkBeginCommandBuffer(m_data->transferCmd, &beginInfo), "vkBeginCommandBuffer (transfer)");
+        return m_data->transferCmd;
+    }
+
+    void VulkanDevice::endTransferCommands()
+    {
         VkCheck(vkEndCommandBuffer(m_data->transferCmd), "vkEndCommandBuffer (transfer)");
 
         VkSubmitInfo submitInfo{};
@@ -663,9 +740,232 @@ namespace dmrender {
         VkCheck(vkQueueSubmit(m_data->transferQueue, 1, &submitInfo, m_data->transferFence),
                 "vkQueueSubmit (transfer)");
         // Waiting keeps the staging buffer safe to overwrite on the next call and lets the caller
-        // treat createBuffer() as "the data is there when this returns".
+        // treat createBuffer()/createImage() as "the data is there when this returns".
         VkCheck(vkWaitForFences(m_data->device, 1, &m_data->transferFence, VK_TRUE, UINT64_MAX),
                 "vkWaitForFences (transfer)");
+    }
+
+    namespace {
+
+        /// @brief Records a layout transition for a range of mip levels.
+        void transitionLevels(VkCommandBuffer cmd,
+                              VkImage image,
+                              uint32_t baseMipLevel,
+                              uint32_t levelCount,
+                              VkImageLayout oldLayout,
+                              VkImageLayout newLayout,
+                              VkAccessFlags srcAccess,
+                              VkAccessFlags dstAccess,
+                              VkPipelineStageFlags srcStage,
+                              VkPipelineStageFlags dstStage)
+        {
+            VkImageMemoryBarrier barrier{};
+            barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+            barrier.oldLayout = oldLayout;
+            barrier.newLayout = newLayout;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image;
+            barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            barrier.subresourceRange.baseMipLevel = baseMipLevel;
+            barrier.subresourceRange.levelCount = levelCount;
+            barrier.subresourceRange.baseArrayLayer = 0;
+            barrier.subresourceRange.layerCount = 1;
+            barrier.srcAccessMask = srcAccess;
+            barrier.dstAccessMask = dstAccess;
+
+            vkCmdPipelineBarrier(cmd, srcStage, dstStage, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+        }
+
+    } // namespace
+
+    void VulkanDevice::uploadToImage(VkImage image,
+                                     uint32_t width,
+                                     uint32_t height,
+                                     uint32_t mipLevel,
+                                     const void* data,
+                                     VkDeviceSize size,
+                                     VkImageLayout finalLayout)
+    {
+        if (!data || size == 0) return;
+
+        ensureStagingCapacity(size);
+        std::memcpy(m_data->stagingAllocation.mapped, data, static_cast<size_t>(size));
+
+        VkCommandBuffer cmd = beginTransferCommands();
+
+        // UNDEFINED as the old layout discards whatever was there, which is correct because the
+        // copy below overwrites the entire level.
+        transitionLevels(cmd, image, mipLevel, 1,
+                         VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                         0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;    // zero means tightly packed, which is what the interface requires
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = mipLevel;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = { width, height, 1 };
+
+        vkCmdCopyBufferToImage(cmd, m_data->stagingBuffer, image,
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+        transitionLevels(cmd, image, mipLevel, 1,
+                         VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, finalLayout,
+                         VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+        endTransferCommands();
+    }
+
+    void VulkanDevice::readbackFromImage(VkImage image,
+                                         uint32_t width,
+                                         uint32_t height,
+                                         uint32_t mipLevel,
+                                         void* destination,
+                                         VkDeviceSize size,
+                                         VkImageLayout currentLayout)
+    {
+        if (!destination || size == 0) return;
+
+        // Everything already submitted must finish before its results can be read.
+        VkCheck(vkDeviceWaitIdle(m_data->device), "vkDeviceWaitIdle (readback)");
+
+        ensureStagingCapacity(size);
+        VkCommandBuffer cmd = beginTransferCommands();
+
+        transitionLevels(cmd, image, mipLevel, 1,
+                         currentLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        VkBufferImageCopy region{};
+        region.bufferOffset = 0;
+        region.bufferRowLength = 0;   // tightly packed
+        region.bufferImageHeight = 0;
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = mipLevel;
+        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = { 0, 0, 0 };
+        region.imageExtent = { width, height, 1 };
+
+        vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               m_data->stagingBuffer, 1, &region);
+
+        // Put the image back where it was, so a readback is transparent to the render loop.
+        transitionLevels(cmd, image, mipLevel, 1,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, currentLayout,
+                         VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+        endTransferCommands();
+
+        std::memcpy(destination, m_data->stagingAllocation.mapped, static_cast<size_t>(size));
+    }
+
+    void VulkanDevice::readbackFromBuffer(VkBuffer source,
+                                          VkDeviceSize sourceOffset,
+                                          void* destination,
+                                          VkDeviceSize size)
+    {
+        if (!destination || size == 0) return;
+
+        VkCheck(vkDeviceWaitIdle(m_data->device), "vkDeviceWaitIdle (readback)");
+
+        ensureStagingCapacity(size);
+        VkCommandBuffer cmd = beginTransferCommands();
+
+        VkBufferCopy region{};
+        region.srcOffset = sourceOffset;
+        region.dstOffset = 0;
+        region.size = size;
+        vkCmdCopyBuffer(cmd, source, m_data->stagingBuffer, 1, &region);
+
+        endTransferCommands();
+
+        std::memcpy(destination, m_data->stagingAllocation.mapped, static_cast<size_t>(size));
+    }
+
+    void VulkanDevice::generateMipmaps(VkImage image,
+                                       VkFormat format,
+                                       uint32_t width,
+                                       uint32_t height,
+                                       uint32_t mipLevels,
+                                       VkImageLayout finalLayout)
+    {
+        if (mipLevels <= 1) return;
+
+        // Downsampling here is a linear-filtered blit, which not every format supports. The
+        // alternative would be a compute or fragment downsample pass; for now, say so clearly.
+        VkFormatProperties formatProperties{};
+        vkGetPhysicalDeviceFormatProperties(m_data->physicalDevice, format, &formatProperties);
+        if (!(formatProperties.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT)) {
+            throw std::runtime_error("generateMipmaps: format does not support linear filtered blits");
+        }
+
+        VkCommandBuffer cmd = beginTransferCommands();
+
+        // Level 0 already holds the uploaded image and sits in its resting layout; every other
+        // level is undefined. Move level 0 to TRANSFER_SRC so it can seed the chain.
+        transitionLevels(cmd, image, 0, 1,
+                         finalLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                         VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+        int32_t levelWidth = static_cast<int32_t>(width);
+        int32_t levelHeight = static_cast<int32_t>(height);
+
+        for (uint32_t level = 1; level < mipLevels; ++level) {
+            const int32_t nextWidth = levelWidth > 1 ? levelWidth / 2 : 1;
+            const int32_t nextHeight = levelHeight > 1 ? levelHeight / 2 : 1;
+
+            transitionLevels(cmd, image, level, 1,
+                             VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                             0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+            VkImageBlit blit{};
+            blit.srcOffsets[0] = { 0, 0, 0 };
+            blit.srcOffsets[1] = { levelWidth, levelHeight, 1 };
+            blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.srcSubresource.mipLevel = level - 1;
+            blit.srcSubresource.baseArrayLayer = 0;
+            blit.srcSubresource.layerCount = 1;
+            blit.dstOffsets[0] = { 0, 0, 0 };
+            blit.dstOffsets[1] = { nextWidth, nextHeight, 1 };
+            blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            blit.dstSubresource.mipLevel = level;
+            blit.dstSubresource.baseArrayLayer = 0;
+            blit.dstSubresource.layerCount = 1;
+
+            vkCmdBlitImage(cmd,
+                           image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &blit, VK_FILTER_LINEAR);
+
+            // This level becomes the source for the next iteration.
+            transitionLevels(cmd, image, level, 1,
+                             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                             VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+
+            levelWidth = nextWidth;
+            levelHeight = nextHeight;
+        }
+
+        // Every level is now TRANSFER_SRC; put the whole chain back into its resting layout.
+        transitionLevels(cmd, image, 0, mipLevels,
+                         VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, finalLayout,
+                         VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+
+        endTransferCommands();
     }
 
     uint32_t VulkanDevice::getGraphicsFamilyIndex() const
@@ -734,6 +1034,11 @@ namespace dmrender {
         m_activatedInstanceExtensions.insert(DeviceExtension::SwapChain);
 
         vkGetPhysicalDeviceMemoryProperties(m_data->physicalDevice, &m_data->memoryProperties);
+
+        m_data->allocator = std::make_unique<VulkanMemoryAllocator>(
+            m_data->device,
+            m_data->memoryProperties,
+            m_data->properties.limits.bufferImageGranularity);
 
         // Transfer context. The queue handle is the same object VulkanCommandQueues will fetch —
         // vkGetDeviceQueue returns the identical queue for the same family and index — so uploads

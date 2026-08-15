@@ -4,6 +4,8 @@
 #include <stdexcept>
 #include <vector>
 
+#include "Commandbuffer.hpp"   // kMaxPushConstantBytes
+
 #include <render_vulkan/VulkanDevice.hpp>
 #include <render_vulkan/VulkanShaderFunction.hpp>
 #include <render_vulkan/VulkanUtils.hpp>
@@ -22,14 +24,12 @@ namespace dmrender {
         std::shared_ptr<ShaderFunction> fragmentFunction;
     };
 
-    VulkanPipeline::VulkanPipeline(const std::shared_ptr<Device>& device,
-                                   const std::shared_ptr<ShaderFunction>& vertexFunction,
-                                   const std::shared_ptr<ShaderFunction>& fragmentFunction,
-                                   const RenderTargetFormat& targetFormat,
-                                   const std::string& debugName)
-        : m_data(std::make_unique<VulkanPipelineNativeData>()), m_debugName(debugName)
+    VulkanPipeline::VulkanPipeline(const std::shared_ptr<Device>& device, const PipelineDesc& desc)
+        : m_data(std::make_unique<VulkanPipelineNativeData>()), m_debugName(desc.debugName)
     {
-        if (!vertexFunction || !fragmentFunction) {
+        const RenderTargetFormat& targetFormat = desc.targetFormat;
+
+        if (!desc.vertexFunction || !desc.fragmentFunction) {
             throw std::runtime_error("VulkanPipeline: both a vertex and a fragment function are required");
         }
         if (targetFormat.colorFormats.empty()) {
@@ -38,10 +38,14 @@ namespace dmrender {
         if (targetFormat.colorFormats.size() > kMaxColorAttachments) {
             throw std::runtime_error("VulkanPipeline: more colour formats than kMaxColorAttachments");
         }
+        if (!desc.blendStates.empty() && desc.blendStates.size() != targetFormat.colorFormats.size()) {
+            throw std::runtime_error(
+                "VulkanPipeline: blendStates must be empty or have one entry per colour format");
+        }
 
         m_data->device = static_cast<VulkanDevice*>(device.get());
-        m_data->vertexFunction = vertexFunction;
-        m_data->fragmentFunction = fragmentFunction;
+        m_data->vertexFunction = desc.vertexFunction;
+        m_data->fragmentFunction = desc.fragmentFunction;
 
         VkDevice logicalDevice = m_data->device->logicalDevice();
 
@@ -95,16 +99,27 @@ namespace dmrender {
             m_data->bufferSetLayout,   // set 0
             m_data->textureSetLayout   // set 1
         };
+
+        // One range covering both stages, always declared. A shader that ignores push constants
+        // costs nothing for the range existing, and declaring it unconditionally means any
+        // pipeline can accept setPushConstants() without the caller checking first.
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = static_cast<uint32_t>(kMaxPushConstantBytes);
+
         VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
         pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(std::size(setLayouts));
         pipelineLayoutInfo.pSetLayouts = setLayouts;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
         VkCheck(vkCreatePipelineLayout(logicalDevice, &pipelineLayoutInfo, nullptr, &m_data->pipelineLayout),
                 "vkCreatePipelineLayout");
 
         // --- Programmable stages ---
-        auto* vs = static_cast<VulkanShaderFunction*>(vertexFunction.get());
-        auto* fs = static_cast<VulkanShaderFunction*>(fragmentFunction.get());
+        auto* vs = static_cast<VulkanShaderFunction*>(desc.vertexFunction.get());
+        auto* fs = static_cast<VulkanShaderFunction*>(desc.fragmentFunction.get());
 
         std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
@@ -144,27 +159,36 @@ namespace dmrender {
         rasterizer.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
         rasterizer.depthClampEnable = VK_FALSE;
         rasterizer.rasterizerDiscardEnable = VK_FALSE;
-        rasterizer.polygonMode = VK_POLYGON_MODE_FILL;
+        rasterizer.polygonMode = ToVkPolygonMode(desc.rasterizer.polygonMode);
         rasterizer.lineWidth = 1.0f;
-        // Metal rasterises with MTLCullModeNone unless told otherwise; matching that means the
-        // quad's winding order cannot change the result on either backend.
-        rasterizer.cullMode = VK_CULL_MODE_NONE;
-        rasterizer.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
-        rasterizer.depthBiasEnable = VK_FALSE;
+        rasterizer.cullMode = ToVkCullMode(desc.rasterizer.cullMode);
+        rasterizer.frontFace = ToVkFrontFace(desc.rasterizer.frontFace);
+        rasterizer.depthBiasEnable = desc.rasterizer.depthBiasEnabled() ? VK_TRUE : VK_FALSE;
+        rasterizer.depthBiasConstantFactor = desc.rasterizer.depthBiasConstant;
+        rasterizer.depthBiasSlopeFactor = desc.rasterizer.depthBiasSlope;
 
         VkPipelineMultisampleStateCreateInfo multisampling{};
         multisampling.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
         multisampling.sampleShadingEnable = VK_FALSE;
-        multisampling.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        // Must equal the render pass's sample count or the pipeline is invalid there.
+        multisampling.rasterizationSamples = ToVkSampleCount(targetFormat.sampleCount);
 
         // Vulkan requires exactly one blend state per colour attachment in the render pass, even
-        // when they are all identical. Metal's colorAttachments[i] defaults do the same job.
+        // when they are all identical. An empty blendStates means "opaque everywhere".
         std::vector<VkPipelineColorBlendAttachmentState> colorBlendAttachments(
             targetFormat.colorFormats.size());
-        for (VkPipelineColorBlendAttachmentState& attachment : colorBlendAttachments) {
-            attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-            attachment.blendEnable = VK_FALSE;
+        for (size_t i = 0; i < colorBlendAttachments.size(); ++i) {
+            const BlendState blend = desc.blendStates.empty() ? BlendState{} : desc.blendStates[i];
+            VkPipelineColorBlendAttachmentState& attachment = colorBlendAttachments[i];
+
+            attachment.blendEnable = blend.enabled ? VK_TRUE : VK_FALSE;
+            attachment.srcColorBlendFactor = ToVkBlendFactor(blend.srcColorFactor);
+            attachment.dstColorBlendFactor = ToVkBlendFactor(blend.dstColorFactor);
+            attachment.colorBlendOp = ToVkBlendOp(blend.colorOp);
+            attachment.srcAlphaBlendFactor = ToVkBlendFactor(blend.srcAlphaFactor);
+            attachment.dstAlphaBlendFactor = ToVkBlendFactor(blend.dstAlphaFactor);
+            attachment.alphaBlendOp = ToVkBlendOp(blend.alphaOp);
+            attachment.colorWriteMask = ToVkColorComponents(blend.writeMask);
         }
 
         VkPipelineColorBlendStateCreateInfo colorBlending{};
@@ -174,21 +198,34 @@ namespace dmrender {
         colorBlending.pAttachments = colorBlendAttachments.data();
 
         const bool hasDepth = targetFormat.depthFormat != ImageFormat::Undefined;
+        if (!hasDepth && (desc.depthStencil.depthTestEnabled || desc.depthStencil.stencilTestEnabled)) {
+            throw std::runtime_error(
+                "VulkanPipeline: depth or stencil testing was requested but "
+                "RenderTargetFormat::depthFormat is Undefined");
+        }
+
         VkPipelineDepthStencilStateCreateInfo depthStencil{};
         depthStencil.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        depthStencil.depthTestEnable = hasDepth ? VK_TRUE : VK_FALSE;
-        depthStencil.depthWriteEnable = hasDepth ? VK_TRUE : VK_FALSE;
-        depthStencil.depthCompareOp = VK_COMPARE_OP_LESS;
+        depthStencil.depthTestEnable = desc.depthStencil.depthTestEnabled ? VK_TRUE : VK_FALSE;
+        depthStencil.depthWriteEnable = desc.depthStencil.depthWriteEnabled ? VK_TRUE : VK_FALSE;
+        depthStencil.depthCompareOp = ToVkCompareOp(desc.depthStencil.depthCompareOp);
         depthStencil.depthBoundsTestEnable = VK_FALSE;
-        depthStencil.stencilTestEnable = VK_FALSE;
+        depthStencil.stencilTestEnable = desc.depthStencil.stencilTestEnabled ? VK_TRUE : VK_FALSE;
+        depthStencil.front = ToVkStencilOpState(desc.depthStencil.front);
+        depthStencil.back = ToVkStencilOpState(desc.depthStencil.back);
 
         // Only attachment counts, formats and sample counts matter for render pass compatibility,
         // so the cached clear-variant works for pipelines that later run inside the load-variant,
         // and the resting layouts chosen here are irrelevant to the match.
         RenderPassKey key{};
+        key.samples = ToVkSampleCount(targetFormat.sampleCount);
+        const bool multisampled = targetFormat.sampleCount != SampleCount::One;
         for (ImageFormat colorFormat : targetFormat.colorFormats) {
+            // Compatibility also covers whether a resolve target exists, so a multisample
+            // pipeline is matched against the resolving variant of the pass.
             key.colors.push_back(RenderPassAttachmentKey{
-                ToVkFormat(colorFormat), /*clear=*/true, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
+                ToVkFormat(colorFormat), /*clear=*/true, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                /*hasResolve=*/multisampled, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL });
         }
         key.depth = RenderPassAttachmentKey{
             ToVkFormat(targetFormat.depthFormat), /*clear=*/true,

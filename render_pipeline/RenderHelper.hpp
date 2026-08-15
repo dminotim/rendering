@@ -56,6 +56,19 @@ namespace dmrender
                 const std::string& functionName
         );
 
+        /**
+         * @brief Creates a pipeline with full control over its fixed-function state.
+         */
+        std::shared_ptr<Pipeline> createPipeline(
+                const std::shared_ptr<Device>& device,
+                const PipelineDesc& desc
+        );
+
+        /**
+         * @brief Convenience overload for opaque rendering with no depth test.
+         *
+         * Equivalent to filling a PipelineDesc and leaving every state struct at its default.
+         */
         std::shared_ptr<Pipeline> createPipeline(
                 const std::shared_ptr<Device>& device,
                 const std::shared_ptr<ShaderFunction>& vertexFunction,

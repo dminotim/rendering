@@ -9,6 +9,8 @@ namespace dmrender {
     struct VulkanRenderPassDescriptorNativeData
     {
         std::array<VulkanRenderPassDescriptor::Attachment, kMaxColorAttachments> colors;
+        /// Parallel to `colors`; entries stay null when the attachment is not multisampled.
+        std::array<std::shared_ptr<GImage>, kMaxColorAttachments> resolves;
         /// One past the highest index ever passed to setColorAttachment().
         uint32_t colorCount = 0;
         VulkanRenderPassDescriptor::Attachment depthStencil;
@@ -40,6 +42,23 @@ namespace dmrender {
     uint32_t VulkanRenderPassDescriptor::colorAttachmentCount() const
     {
         return m_data->colorCount;
+    }
+
+    void VulkanRenderPassDescriptor::setResolveAttachment(uint32_t index,
+                                                          const std::shared_ptr<GImage>& resolveImage)
+    {
+        if (index >= kMaxColorAttachments) {
+            throw std::runtime_error("VulkanRenderPassDescriptor: resolve attachment index is out of range");
+        }
+        m_data->resolves[index] = resolveImage;
+    }
+
+    const std::shared_ptr<GImage>& VulkanRenderPassDescriptor::resolveAttachment(uint32_t index) const
+    {
+        if (index >= kMaxColorAttachments) {
+            throw std::runtime_error("VulkanRenderPassDescriptor: resolve attachment index is out of range");
+        }
+        return m_data->resolves[index];
     }
 
     void VulkanRenderPassDescriptor::setDepthStencilAttachment(const std::shared_ptr<GImage>& image,

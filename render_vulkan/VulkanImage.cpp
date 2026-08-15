@@ -1,6 +1,8 @@
 #include "VulkanImage.hpp"
 
+#include <algorithm>
 #include <stdexcept>
+#include <string>
 
 #include <render_vulkan/VulkanDevice.hpp>
 #include <render_vulkan/VulkanUtils.hpp>
@@ -15,7 +17,7 @@ namespace dmrender {
 
         VkImage image = VK_NULL_HANDLE;
         VkImageView imageView = VK_NULL_HANDLE;
-        VkDeviceMemory memory = VK_NULL_HANDLE;  ///< Owned images only.
+        VulkanAllocation allocation{};           ///< Owned images only.
         bool owning = false;
 
         VkImageLayout restingLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -25,6 +27,8 @@ namespace dmrender {
         uint32_t height = 0;
         ImageUsage usage = ImageUsage::ColorTarget;
         ImageType type = ImageType::Image2D;
+        uint32_t mipLevels = 1;
+        SampleCount sampleCount = SampleCount::One;
         std::string debugName;
     };
 
@@ -39,6 +43,17 @@ namespace dmrender {
                 case ImageType::CubeMap:
                 default:                 return VK_IMAGE_TYPE_2D;
             }
+        }
+
+        /// @brief Turns a requested level count into a concrete one, expanding kFullMipChain.
+        uint32_t resolveMipLevels(uint32_t requested, uint32_t width, uint32_t height)
+        {
+            const uint32_t largest = std::max(width, height);
+            uint32_t maximum = 1;
+            while ((largest >> (maximum - 1)) > 1) ++maximum;
+
+            if (requested == kFullMipChain) return maximum;
+            return std::min(requested, maximum);
         }
 
         VkImageViewType toVkImageViewType(ImageType type)
@@ -80,47 +95,67 @@ namespace dmrender {
         m_data->debugName = debugName;
     }
 
-    VulkanImage::VulkanImage(VulkanDevice* device,
-                             ImageType type,
-                             ImageFormat format,
-                             uint32_t width,
-                             uint32_t height,
-                             ImageUsage usage,
-                             const std::string& debugName)
+    VulkanImage::VulkanImage(VulkanDevice* device, const ImageDesc& desc, const void* initialData)
         : m_data(std::make_unique<VulkanImageNativeData>())
     {
         if (!device) throw std::runtime_error("VulkanImage: null device");
-        if (width == 0 || height == 0) throw std::runtime_error("VulkanImage: zero sized image");
+        if (desc.width == 0 || desc.height == 0) throw std::runtime_error("VulkanImage: zero sized image");
 
         m_data->device = device;
         m_data->owning = true;
-        m_data->restingLayout = RestingLayoutFor(usage, /*isSwapChainImage=*/false);
-        m_data->format = format;
-        m_data->width = width;
-        m_data->height = height;
-        m_data->usage = usage;
-        m_data->type = type;
-        m_data->debugName = debugName;
+        m_data->restingLayout = RestingLayoutFor(desc.usage, /*isSwapChainImage=*/false);
+        m_data->format = desc.format;
+        m_data->width = desc.width;
+        m_data->height = desc.height;
+        m_data->usage = desc.usage;
+        m_data->type = desc.type;
+        m_data->debugName = desc.debugName;
+        m_data->sampleCount = desc.sampleCount;
+        m_data->mipLevels = resolveMipLevels(desc.mipLevels, desc.width, desc.height);
+
+        const bool multisampled = desc.sampleCount != SampleCount::One;
+        if (multisampled) {
+            // Both restrictions come from the APIs rather than from this wrapper, and hitting
+            // either produces a confusing driver error, so say what is wrong up front.
+            if (m_data->mipLevels != 1) {
+                throw std::runtime_error("VulkanImage: a multisample image cannot have mip levels");
+            }
+            if (hasFlag(desc.usage, ImageUsage::Sampled)) {
+                throw std::runtime_error(
+                    "VulkanImage: a multisample image cannot be sampled; render into it and "
+                    "resolve into a single-sample image instead");
+            }
+        }
 
         VkDevice logicalDevice = device->logicalDevice();
-        const VkFormat vkFormat = ToVkFormat(format);
+        const VkFormat vkFormat = ToVkFormat(desc.format);
 
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        imageInfo.imageType = toVkImageType(type);
+        imageInfo.imageType = toVkImageType(desc.type);
         imageInfo.format = vkFormat;
-        imageInfo.extent = { width, height, 1 };
-        imageInfo.mipLevels = 1;
-        imageInfo.arrayLayers = (type == ImageType::CubeMap) ? 6 : 1;
-        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.extent = { desc.width, desc.height, 1 };
+        imageInfo.mipLevels = m_data->mipLevels;
+        imageInfo.arrayLayers = (desc.type == ImageType::CubeMap) ? 6 : 1;
+        imageInfo.samples = ToVkSampleCount(desc.sampleCount);
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-        imageInfo.usage = ToVkImageUsage(usage);
+        imageInfo.usage = ToVkImageUsage(desc.usage);
+        if (!multisampled) {
+            // Uploading needs TRANSFER_DST, and generating the chain blits each level from the
+            // one above, so a mipmapped image is also a transfer source. Neither is expressible
+            // through ImageUsage, so they are added here rather than making every caller
+            // remember them. Multisample images can do neither, so they get neither.
+            imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+            if (m_data->mipLevels > 1) {
+                imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+            }
+        }
         imageInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         // Every render pass that writes this image either clears it — in which case the contents
         // are discarded and the initial layout is UNDEFINED anyway — or expects it in its resting
         // layout, which a previous pass will have left it in.
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (type == ImageType::CubeMap) {
+        if (desc.type == ImageType::CubeMap) {
             imageInfo.flags = VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
         }
 
@@ -137,35 +172,106 @@ namespace dmrender {
             vkDestroyImage(logicalDevice, m_data->image, nullptr);
             m_data->image = VK_NULL_HANDLE;
             throw std::runtime_error(
-                "VulkanImage: '" + debugName + "' needs " + std::to_string(requirements.size / 1024) +
+                "VulkanImage: '" + desc.debugName + "' needs " + std::to_string(requirements.size / 1024) +
                 " KiB of device-local memory but only " + std::to_string(budget.availableBytes() / 1024) +
                 " KiB is available");
         }
 
         VkMemoryPropertyFlags chosenFlags = 0;
-        VkMemoryAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocInfo.allocationSize = requirements.size;
-        allocInfo.memoryTypeIndex = device->selectMemoryType(requirements.memoryTypeBits,
-                                                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
-                                                             0,
-                                                             chosenFlags);
-        VkCheck(vkAllocateMemory(logicalDevice, &allocInfo, nullptr, &m_data->memory), "vkAllocateMemory");
-        VkCheck(vkBindImageMemory(logicalDevice, m_data->image, m_data->memory, 0), "vkBindImageMemory");
+        const uint32_t memoryTypeIndex = device->selectMemoryType(requirements.memoryTypeBits,
+                                                                  VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT,
+                                                                  0,
+                                                                  chosenFlags);
+        // Optimal tiling, so this comes from an image-only pool — see the allocator's note on
+        // bufferImageGranularity.
+        m_data->allocation = device->allocator().allocate(
+            requirements, memoryTypeIndex, VulkanMemoryAllocator::ResourceKind::Optimal);
+        VkCheck(vkBindImageMemory(logicalDevice, m_data->image,
+                                  m_data->allocation.memory, m_data->allocation.offset),
+                "vkBindImageMemory");
 
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewInfo.image = m_data->image;
-        viewInfo.viewType = toVkImageViewType(type);
+        viewInfo.viewType = toVkImageViewType(desc.type);
         viewInfo.format = vkFormat;
-        viewInfo.subresourceRange.aspectMask = IsDepthFormat(format)
+        viewInfo.subresourceRange.aspectMask = IsDepthFormat(desc.format)
             ? VK_IMAGE_ASPECT_DEPTH_BIT
             : VK_IMAGE_ASPECT_COLOR_BIT;
         viewInfo.subresourceRange.baseMipLevel = 0;
-        viewInfo.subresourceRange.levelCount = 1;
+        // The view spans the whole chain so a sampler can select across levels. A render pass
+        // attaching this image writes level 0, which is what a single-level view would give.
+        viewInfo.subresourceRange.levelCount = m_data->mipLevels;
         viewInfo.subresourceRange.baseArrayLayer = 0;
         viewInfo.subresourceRange.layerCount = imageInfo.arrayLayers;
         VkCheck(vkCreateImageView(logicalDevice, &viewInfo, nullptr, &m_data->imageView), "vkCreateImageView");
+
+        if (initialData) {
+            update(initialData, static_cast<size_t>(desc.width) * desc.height * bytesPerPixel(desc.format), 0);
+            generateMipmaps();
+        }
+    }
+
+    void VulkanImage::update(const void* data, size_t dataSize, uint32_t mipLevel)
+    {
+        if (!data || dataSize == 0) return;
+        if (!m_data->owning) {
+            throw std::runtime_error("GImage::update: a swapchain image cannot be written from the CPU");
+        }
+        if (mipLevel >= m_data->mipLevels) {
+            throw std::runtime_error("GImage::update: mip level is out of range");
+        }
+
+        const uint32_t levelWidth = std::max(1u, m_data->width >> mipLevel);
+        const uint32_t levelHeight = std::max(1u, m_data->height >> mipLevel);
+        const size_t expected = static_cast<size_t>(levelWidth) * levelHeight * bytesPerPixel(m_data->format);
+        if (dataSize != expected) {
+            throw std::runtime_error(
+                "GImage::update: expected " + std::to_string(expected) + " bytes for mip level " +
+                std::to_string(mipLevel) + " but received " + std::to_string(dataSize));
+        }
+
+        m_data->device->uploadToImage(m_data->image, levelWidth, levelHeight, mipLevel,
+                                      data, dataSize, m_data->restingLayout);
+    }
+
+    void VulkanImage::readback(void* destination, size_t destinationSize, uint32_t mipLevel)
+    {
+        if (!destination || destinationSize == 0) return;
+        if (!m_data->owning) {
+            throw std::runtime_error("GImage::readback: a swapchain image cannot be read back");
+        }
+        if (m_data->sampleCount != SampleCount::One) {
+            throw std::runtime_error(
+                "GImage::readback: a multisample image cannot be read back; resolve it first");
+        }
+        if (!hasFlag(m_data->usage, ImageUsage::TransferSrc)) {
+            throw std::runtime_error(
+                "GImage::readback: image was not created with ImageUsage::TransferSrc");
+        }
+        if (mipLevel >= m_data->mipLevels) {
+            throw std::runtime_error("GImage::readback: mip level is out of range");
+        }
+
+        const uint32_t levelWidth = std::max(1u, m_data->width >> mipLevel);
+        const uint32_t levelHeight = std::max(1u, m_data->height >> mipLevel);
+        const size_t expected = static_cast<size_t>(levelWidth) * levelHeight * bytesPerPixel(m_data->format);
+        if (destinationSize != expected) {
+            throw std::runtime_error(
+                "GImage::readback: expected " + std::to_string(expected) + " bytes for mip level " +
+                std::to_string(mipLevel) + " but the destination is " + std::to_string(destinationSize));
+        }
+
+        m_data->device->readbackFromImage(m_data->image, levelWidth, levelHeight, mipLevel,
+                                          destination, destinationSize, m_data->restingLayout);
+    }
+
+    void VulkanImage::generateMipmaps()
+    {
+        if (m_data->mipLevels <= 1) return;
+        m_data->device->generateMipmaps(m_data->image, ToVkFormat(m_data->format),
+                                        m_data->width, m_data->height,
+                                        m_data->mipLevels, m_data->restingLayout);
     }
 
     VulkanImage::~VulkanImage()
@@ -181,16 +287,17 @@ namespace dmrender {
 
         if (m_data->imageView) vkDestroyImageView(logicalDevice, m_data->imageView, nullptr);
         if (m_data->image) vkDestroyImage(logicalDevice, m_data->image, nullptr);
-        if (m_data->memory) vkFreeMemory(logicalDevice, m_data->memory, nullptr);
+        if (m_data->allocation.isValid()) m_data->device->allocator().free(m_data->allocation);
     }
 
     uint32_t VulkanImage::width() const { return m_data->width; }
     uint32_t VulkanImage::height() const { return m_data->height; }
     uint32_t VulkanImage::depth() const { return 1; }
-    uint32_t VulkanImage::mipLevels() const { return 1; }
+    uint32_t VulkanImage::mipLevels() const { return m_data->mipLevels; }
     ImageFormat VulkanImage::format() const { return m_data->format; }
     ImageType VulkanImage::type() const { return m_data->type; }
     ImageUsage VulkanImage::usage() const { return m_data->usage; }
+    SampleCount VulkanImage::sampleCount() const { return m_data->sampleCount; }
 
     MemoryLocation VulkanImage::memoryLocation() const
     {

@@ -50,6 +50,24 @@ namespace dmrender {
         virtual uint32_t colorAttachmentCount() const = 0;
 
         /**
+         * @brief Names the single-sample image a multisample colour attachment resolves into.
+         *
+         * Multisample rendering writes several samples per pixel, which no shader can read. At
+         * the end of the pass those samples are averaged into an ordinary image — the resolve
+         * target — and it is that image later passes sample. Both backends do the resolve as
+         * part of ending the pass, so it costs no extra draw.
+         *
+         * @param index The colour attachment index this resolve belongs to.
+         * @param resolveImage A single-sample image with the same format and size as the
+         *                     attachment at @p index.
+         *
+         * @note Only meaningful when the attachment at @p index is multisampled. Setting it on a
+         *       single-sample attachment is an error.
+         */
+        virtual void setResolveAttachment(uint32_t index,
+                                          const std::shared_ptr<GImage>& resolveImage) = 0;
+
+        /**
          * @brief Configures the depth and stencil attachment for the render pass.
          *
          * This sets up the image resource that will be used for depth and/or stencil testing.

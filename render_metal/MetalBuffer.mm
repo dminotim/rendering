@@ -177,6 +177,25 @@ namespace dmrender {
         return m_data->m_location;
     }
 
+    void MetalBuffer::readback(void* destination, size_t destinationSize, size_t offset) {
+        if (!destination || destinationSize == 0) return;
+        if (offset + destinationSize > m_data->m_size) {
+            throw std::runtime_error("MetalBuffer::readback: read is out of bounds");
+        }
+
+        if (m_data->m_isPrivate) {
+            m_data->m_device->readbackFromPrivateBuffer((__bridge void*)m_data->m_mtlBuffer,
+                                                        offset, destination, destinationSize);
+            return;
+        }
+
+        const void* contents = [m_data->m_mtlBuffer contents];
+        if (!contents) {
+            throw std::runtime_error("MetalBuffer::readback: buffer contents are nil");
+        }
+        memcpy(destination, static_cast<const char*>(contents) + offset, destinationSize);
+    }
+
     void* MetalBuffer::nativeHandle() const {
         return m_data->m_mtlBuffer;
     }
