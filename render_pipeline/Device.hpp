@@ -9,6 +9,8 @@
 #include <memory>
 #include <vector>
 #include "GBuffer.hpp"
+#include "GImage.hpp"
+#include "GSampler.hpp"
 
 namespace dmrender
 {
@@ -84,6 +86,45 @@ namespace dmrender
                 BufferUsage usage,
                 size_t size,
                 const void* initialData = nullptr,
+                const std::string& debugName = ""
+        ) = 0;
+
+        /**
+         * @brief Creates a GPU image resource.
+         *
+         * This is how an offscreen render target is obtained: pass
+         * `ImageUsage::ColorTarget | ImageUsage::Sampled` to get a texture a render pass can
+         * write and a later pass can read back through a sampler.
+         *
+         * @param type The dimensionality of the image.
+         * @param format The pixel format.
+         * @param width The width in pixels.
+         * @param height The height in pixels.
+         * @param usage A bitmask of everything the image will be used for. It must be complete:
+         *              both backends bake usage into the native object at creation time and
+         *              neither can widen it afterwards.
+         * @param debugName An optional name for debugging purposes.
+         * @return A shared pointer to the created GImage, or nullptr on failure.
+         */
+        virtual std::shared_ptr<GImage> createImage(
+                ImageType type,
+                ImageFormat format,
+                uint32_t width,
+                uint32_t height,
+                ImageUsage usage,
+                const std::string& debugName = ""
+        ) = 0;
+
+        /**
+         * @brief Creates a sampler describing how shaders read textures.
+         * @param desc The sampling state.
+         * @param debugName An optional name for debugging purposes.
+         * @return A shared pointer to the created GSampler, or nullptr on failure.
+         * @note Samplers are immutable and cheap to share; create a few and reuse them rather
+         *       than making one per texture.
+         */
+        virtual std::shared_ptr<GSampler> createSampler(
+                const SamplerDesc& desc,
                 const std::string& debugName = ""
         ) = 0;
 

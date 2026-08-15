@@ -28,7 +28,11 @@ namespace dmrender {
          * Each color attachment corresponds to an output location in a fragment shader
          * (e.g., `[[color(0)]]` in Metal Shading Language).
          *
-         * @param index The attachment index (e.g., 0 for the first color target).
+         * Attachments must be configured from index 0 upwards with no gaps: a pass writing to
+         * two targets sets index 0 and index 1. The pipeline used inside the pass must declare
+         * exactly as many colour formats.
+         *
+         * @param index The attachment index, in [0, kMaxColorAttachments).
          * @param image The image resource to use as the render target.
          * @param clear A boolean flag indicating whether the attachment should be cleared
          *              at the beginning of the render pass.
@@ -38,6 +42,12 @@ namespace dmrender {
                                         const std::shared_ptr<GImage>& image,
                                         bool clear,
                                         const ClearValue& clearValue) = 0;
+
+        /**
+         * @brief The number of colour attachments configured so far.
+         * @return One past the highest index passed to setColorAttachment(), or 0 if none.
+         */
+        virtual uint32_t colorAttachmentCount() const = 0;
 
         /**
          * @brief Configures the depth and stencil attachment for the render pass.

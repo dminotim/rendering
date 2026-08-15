@@ -11,6 +11,15 @@
 namespace dmrender {
 
     /**
+     * @brief Maximum number of colour attachments a single render pass may write.
+     *
+     * Both backends guarantee at least this many (Metal's MTLRenderPassDescriptor exposes 8
+     * colour attachments; Vulkan's maxColorAttachments limit is at least 4 and is 8 on every
+     * desktop driver), so this is the ceiling the abstraction commits to.
+     */
+    inline constexpr uint32_t kMaxColorAttachments = 8;
+
+    /**
      * @enum ImageFormat
      * @brief Defines the pixel format of an image resource.
      */

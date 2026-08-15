@@ -14,6 +14,7 @@
 #include <memory>
 
 #include "GImage.hpp"
+#include "GSampler.hpp"
 
 namespace dmrender {
 
@@ -33,11 +34,45 @@ namespace dmrender {
     inline constexpr uint32_t kFramesInFlight = 2;
 
     /**
-     * @brief Highest binding slot the backend reserves in descriptor set 0.
+     * @brief Highest buffer binding slot the backend reserves in descriptor set 0.
      *
      * Slot 0 is the vertex storage buffer, slots 1..kMaxBindingSlots-1 are uniform buffers.
      */
     inline constexpr uint32_t kMaxBindingSlots = 8;
+
+    /**
+     * @brief Highest texture binding slot the backend reserves in descriptor set 1.
+     *
+     * Textures live in their own descriptor set because they live in their own numbering space
+     * in the interface — `setTexture(0, …)` and `setUniformBuffer(0, …)` are different bindings,
+     * matching Metal's separate `[[texture(n)]]` and `[[buffer(n)]]` indices.
+     */
+    inline constexpr uint32_t kMaxTextureSlots = 8;
+
+    /// @brief Descriptor set index holding buffers (`set = 0` in GLSL).
+    inline constexpr uint32_t kBufferDescriptorSet = 0;
+
+    /// @brief Descriptor set index holding combined image samplers (`set = 1` in GLSL).
+    inline constexpr uint32_t kTextureDescriptorSet = 1;
+
+    /// @brief Converts an abstract sampler filter to its Vulkan counterpart.
+    VkFilter ToVkFilter(SamplerFilter filter);
+
+    /// @brief Converts an abstract address mode to its Vulkan counterpart.
+    VkSamplerAddressMode ToVkAddressMode(SamplerAddressMode mode);
+
+    /// @brief The Vulkan usage flags implied by an abstract ImageUsage bitmask.
+    VkImageUsageFlags ToVkImageUsage(ImageUsage usage);
+
+    /**
+     * @brief The layout an image is expected to be in outside of a render pass.
+     *
+     * Every render pass this backend builds leaves its attachments in their resting layout and,
+     * when it does not clear them, expects to find them in it. Tracking one layout per image
+     * rather than a full state machine is enough because the interface only exposes two
+     * transitions: "written by a render pass" and "read by a sampler".
+     */
+    VkImageLayout RestingLayoutFor(ImageUsage usage, bool isSwapChainImage);
 
     /// @brief Throws std::runtime_error with @p what appended when @p result is not VK_SUCCESS.
     void VkCheck(VkResult result, const char* what);

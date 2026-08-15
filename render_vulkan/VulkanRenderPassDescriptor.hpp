@@ -45,6 +45,8 @@ namespace dmrender {
                                 bool clear,
                                 const ClearValue& clearValue) override;
 
+        uint32_t colorAttachmentCount() const override;
+
         void setDepthStencilAttachment(const std::shared_ptr<GImage>& image,
                                        bool clearDepth,
                                        float depthValue,
@@ -58,7 +60,9 @@ namespace dmrender {
          */
         void* nativeHandle() override;
 
-        const Attachment& colorAttachment() const;
+        /// @brief The attachment configured at @p index; invalid (image == nullptr) if never set.
+        const Attachment& colorAttachment(uint32_t index) const;
+
         const Attachment& depthStencilAttachment() const;
         bool clearStencil() const;
 

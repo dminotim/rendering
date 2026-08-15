@@ -63,13 +63,17 @@ namespace dmrender
 			        "vkCreateFence");
 		}
 
+		// A draw call may consume up to two sets: one of buffers, one of textures. Each is
+		// allocated against a layout declaring every slot, so the pool must be able to satisfy
+		// the full layout even when only a couple of bindings are actually written.
 		const VkDescriptorPoolSize poolSizes[] = {
-			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kDescriptorSetsPerFrame * kMaxBindingSlots },
-			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kDescriptorSetsPerFrame * kMaxBindingSlots },
+			{ VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         kDescriptorSetsPerFrame * kMaxBindingSlots },
+			{ VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         kDescriptorSetsPerFrame * kMaxBindingSlots },
+			{ VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kDescriptorSetsPerFrame * kMaxTextureSlots },
 		};
 		VkDescriptorPoolCreateInfo descriptorPoolInfo{};
 		descriptorPoolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-		descriptorPoolInfo.maxSets = kDescriptorSetsPerFrame;
+		descriptorPoolInfo.maxSets = kDescriptorSetsPerFrame * 2;
 		descriptorPoolInfo.poolSizeCount = static_cast<uint32_t>(std::size(poolSizes));
 		descriptorPoolInfo.pPoolSizes = poolSizes;
 		m_data->descriptorPools.resize(kFramesInFlight, VK_NULL_HANDLE);

@@ -1,10 +1,14 @@
 ﻿#include "VulkanDevice.hpp"
 #include <vulkan/vulkan.h>
+#include <algorithm>
 #include <map>
+#include <utility>
 #include <stdexcept>
 #include <optional>
 #include <tuple>
 #include <render_vulkan/VulkanBuffer.hpp>
+#include <render_vulkan/VulkanImage.hpp>
+#include <render_vulkan/VulkanSampler.hpp>
 #include <render_vulkan/VulkanSingleton.hpp>
 #include <render_vulkan/VulkanUtils.hpp>
 
@@ -19,13 +23,25 @@ namespace dmrender {
         VkPhysicalDeviceProperties properties{};
         /// @brief Render passes are immutable and cheap to share, so they are cached forever.
         std::map<RenderPassKey, VkRenderPass> renderPasses;
+        /// @brief Framebuffers, keyed by the render pass and the exact set of views they wrap.
+        std::map<std::pair<VkRenderPass, std::vector<VkImageView>>, VkFramebuffer> framebuffers;
         uint32_t currentFrameSlot = 0;
     };
 
+    bool RenderPassAttachmentKey::operator<(const RenderPassAttachmentKey& other) const
+    {
+        return std::tie(format, clear, restingLayout) <
+               std::tie(other.format, other.clear, other.restingLayout);
+    }
+
     bool RenderPassKey::operator<(const RenderPassKey& other) const
     {
-        return std::tie(colorFormat, depthFormat, clearColor, clearDepth) <
-               std::tie(other.colorFormat, other.depthFormat, other.clearColor, other.clearDepth);
+        if (colors.size() != other.colors.size()) return colors.size() < other.colors.size();
+        for (size_t i = 0; i < colors.size(); ++i) {
+            if (colors[i] < other.colors[i]) return true;
+            if (other.colors[i] < colors[i]) return false;
+        }
+        return depth < other.depth;
     }
 
     struct QueueFamilyIndices {
@@ -189,6 +205,10 @@ namespace dmrender {
             return;
 
         vkDeviceWaitIdle(m_data->device);
+        for (auto& [key, framebuffer] : m_data->framebuffers) {
+            vkDestroyFramebuffer(m_data->device, framebuffer, nullptr);
+        }
+        m_data->framebuffers.clear();
         for (auto& [key, renderPass] : m_data->renderPasses) {
             vkDestroyRenderPass(m_data->device, renderPass, nullptr);
         }
@@ -258,60 +278,97 @@ namespace dmrender {
             return it->second;
         }
 
+        if (key.colors.empty()) {
+            throw std::runtime_error("acquireRenderPass: a render pass needs at least one colour attachment");
+        }
+
         std::vector<VkAttachmentDescription> attachments;
-        VkAttachmentReference colorRef{};
+        std::vector<VkAttachmentReference> colorRefs;
+        attachments.reserve(key.colors.size() + 1);
+        colorRefs.reserve(key.colors.size());
+
+        // One description per colour attachment. Each carries its own resting layout, so a pass
+        // writing a swapchain image alongside an offscreen texture ends with the first in
+        // PRESENT_SRC_KHR and the second in SHADER_READ_ONLY_OPTIMAL, ready to be sampled.
+        for (const RenderPassAttachmentKey& color : key.colors) {
+            VkAttachmentDescription description{};
+            description.format = color.format;
+            description.samples = VK_SAMPLE_COUNT_1_BIT;
+            description.loadOp = color.clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            description.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            description.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            // Clearing discards whatever was there, so the previous layout does not matter and
+            // UNDEFINED lets the driver skip a decompress.
+            description.initialLayout = color.clear ? VK_IMAGE_LAYOUT_UNDEFINED : color.restingLayout;
+            description.finalLayout = color.restingLayout;
+
+            VkAttachmentReference ref{};
+            ref.attachment = static_cast<uint32_t>(attachments.size());
+            ref.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+
+            attachments.push_back(description);
+            colorRefs.push_back(ref);
+        }
+
         VkAttachmentReference depthRef{};
-
-        // Colour attachment. The final layout is PRESENT_SRC because every render pass this
-        // backend builds targets a swapchain image; an offscreen path would key on that too.
-        VkAttachmentDescription color{};
-        color.format = key.colorFormat;
-        color.samples = VK_SAMPLE_COUNT_1_BIT;
-        color.loadOp = key.clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        color.initialLayout = key.clearColor ? VK_IMAGE_LAYOUT_UNDEFINED : VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        color.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-        colorRef.attachment = 0;
-        colorRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        attachments.push_back(color);
-
-        const bool hasDepth = key.depthFormat != VK_FORMAT_UNDEFINED;
+        const bool hasDepth = key.depth.format != VK_FORMAT_UNDEFINED;
         if (hasDepth) {
-            VkAttachmentDescription depth{};
-            depth.format = key.depthFormat;
-            depth.samples = VK_SAMPLE_COUNT_1_BIT;
-            depth.loadOp = key.clearDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-            depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-            depth.stencilLoadOp = key.clearDepth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-            depth.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-            depth.initialLayout = key.clearDepth ? VK_IMAGE_LAYOUT_UNDEFINED
-                                                 : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            depth.finalLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            depthRef.attachment = 1;
+            VkAttachmentDescription description{};
+            description.format = key.depth.format;
+            description.samples = VK_SAMPLE_COUNT_1_BIT;
+            description.loadOp = key.depth.clear ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
+            description.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            description.stencilLoadOp = key.depth.clear ? VK_ATTACHMENT_LOAD_OP_CLEAR
+                                                        : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            description.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+            description.initialLayout = key.depth.clear ? VK_IMAGE_LAYOUT_UNDEFINED : key.depth.restingLayout;
+            description.finalLayout = key.depth.restingLayout;
+
+            depthRef.attachment = static_cast<uint32_t>(attachments.size());
             depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-            attachments.push_back(depth);
+            attachments.push_back(description);
         }
 
         VkSubpassDescription subpass{};
         subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-        subpass.colorAttachmentCount = 1;
-        subpass.pColorAttachments = &colorRef;
+        subpass.colorAttachmentCount = static_cast<uint32_t>(colorRefs.size());
+        subpass.pColorAttachments = colorRefs.data();
         subpass.pDepthStencilAttachment = hasDepth ? &depthRef : nullptr;
 
-        // Wait for the presentation engine to be done with the image before writing it.
-        VkSubpassDependency dependency{};
-        dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
-        dependency.dstSubpass = 0;
-        dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.srcAccessMask = 0;
-        dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-        dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        // Two external dependencies bracket the subpass, and between them they remove the need
+        // for any explicit barrier around an offscreen target:
+        //
+        //   [in]  nothing may write these attachments until the presentation engine has released
+        //         them and until any earlier pass that sampled them has finished reading.
+        //   [out] the colour writes must be visible to a later pass's fragment shader, which is
+        //         what makes "render to a texture, then sample it" work inside one command buffer.
+        VkSubpassDependency dependencies[2]{};
+
+        dependencies[0].srcSubpass = VK_SUBPASS_EXTERNAL;
+        dependencies[0].dstSubpass = 0;
+        dependencies[0].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                                       VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[0].srcAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        dependencies[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependencies[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                                        VK_ACCESS_COLOR_ATTACHMENT_READ_BIT;
+
+        dependencies[1].srcSubpass = 0;
+        dependencies[1].dstSubpass = VK_SUBPASS_EXTERNAL;
+        dependencies[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dependencies[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dependencies[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        dependencies[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+
         if (hasDepth) {
-            dependency.srcStageMask |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-            dependency.dstStageMask |= VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-            dependency.dstAccessMask |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            const VkPipelineStageFlags depthStages = VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                                                     VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+            dependencies[0].srcStageMask |= depthStages;
+            dependencies[0].dstStageMask |= depthStages;
+            dependencies[0].dstAccessMask |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+            dependencies[1].srcStageMask |= depthStages;
+            dependencies[1].srcAccessMask |= VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         }
 
         VkRenderPassCreateInfo info{};
@@ -320,13 +377,72 @@ namespace dmrender {
         info.pAttachments = attachments.data();
         info.subpassCount = 1;
         info.pSubpasses = &subpass;
-        info.dependencyCount = 1;
-        info.pDependencies = &dependency;
+        info.dependencyCount = 2;
+        info.pDependencies = dependencies;
 
         VkRenderPass renderPass = VK_NULL_HANDLE;
         VkCheck(vkCreateRenderPass(m_data->device, &info, nullptr, &renderPass), "vkCreateRenderPass");
         m_data->renderPasses.emplace(key, renderPass);
         return renderPass;
+    }
+
+    VkFramebuffer VulkanDevice::acquireFramebuffer(VkRenderPass renderPass,
+                                                   const std::vector<VkImageView>& attachments,
+                                                   uint32_t width,
+                                                   uint32_t height)
+    {
+        const auto key = std::make_pair(renderPass, attachments);
+        if (auto it = m_data->framebuffers.find(key); it != m_data->framebuffers.end()) {
+            return it->second;
+        }
+
+        VkFramebufferCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        info.renderPass = renderPass;
+        info.attachmentCount = static_cast<uint32_t>(attachments.size());
+        info.pAttachments = attachments.data();
+        info.width = width;
+        info.height = height;
+        info.layers = 1;
+
+        VkFramebuffer framebuffer = VK_NULL_HANDLE;
+        VkCheck(vkCreateFramebuffer(m_data->device, &info, nullptr, &framebuffer), "vkCreateFramebuffer");
+        m_data->framebuffers.emplace(key, framebuffer);
+        return framebuffer;
+    }
+
+    void VulkanDevice::invalidateFramebuffersUsing(VkImageView view)
+    {
+        for (auto it = m_data->framebuffers.begin(); it != m_data->framebuffers.end(); ) {
+            const std::vector<VkImageView>& attachments = it->first.second;
+            const bool referencesView =
+                std::find(attachments.begin(), attachments.end(), view) != attachments.end();
+
+            if (referencesView) {
+                vkDestroyFramebuffer(m_data->device, it->second, nullptr);
+                it = m_data->framebuffers.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    std::shared_ptr<GImage> VulkanDevice::createImage(
+        ImageType type,
+        ImageFormat format,
+        uint32_t width,
+        uint32_t height,
+        ImageUsage usage,
+        const std::string& debugName)
+    {
+        return std::make_shared<VulkanImage>(this, type, format, width, height, usage, debugName);
+    }
+
+    std::shared_ptr<GSampler> VulkanDevice::createSampler(
+        const SamplerDesc& desc,
+        const std::string& debugName)
+    {
+        return std::make_shared<VulkanSampler>(this, desc, debugName);
     }
 
     uint32_t VulkanDevice::getGraphicsFamilyIndex() const

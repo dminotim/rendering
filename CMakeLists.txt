@@ -127,10 +127,19 @@ if(WIN32)
     endif()
     message(STATUS "Using shader compiler: ${GLSLC_EXECUTABLE}")
 
-    # source file -> logical function name the shader is exposed as
+    # source file : logical function name : name of the .metal file it corresponds to
+    #
+    # The last field exists because several GLSL sources map onto entry points of a single Metal
+    # file — PlaneShader.metal holds both plane_fragment_shader and plane_fragment_shader_mrt —
+    # and the artifact must be named after the file the application asks for, not after the GLSL
+    # source it happened to be compiled from.
     set(GLSL_SHADERS
-            "PlaneShader.vert:plane_vertex_shader"
-            "PlaneShader.frag:plane_fragment_shader"
+            "PlaneShader.vert:plane_vertex_shader:PlaneShader"
+            "PlaneShader.frag:plane_fragment_shader:PlaneShader"
+            "PlaneShaderMRT.frag:plane_fragment_shader_mrt:PlaneShader"
+            "Composite.vert:composite_vertex_shader:Composite"
+            "Composite.frag:composite_fragment_shader:Composite"
+            "CompositeMRT.frag:composite_fragment_shader_mrt:Composite"
     )
 
     set(SPIRV_OUTPUTS "")
@@ -138,8 +147,8 @@ if(WIN32)
         string(REPLACE ":" ";" _parts "${_shader_entry}")
         list(GET _parts 0 _shader_file)
         list(GET _parts 1 _function_name)
+        list(GET _parts 2 _shader_stem)
 
-        get_filename_component(_shader_stem "${_shader_file}" NAME_WE)
         set(_shader_src "${CMAKE_SOURCE_DIR}/shaders/glsl/${_shader_file}")
         set(_spirv_out "${SHADER_DIR}/${_shader_stem}.${_function_name}.spv")
 
@@ -158,15 +167,16 @@ if(WIN32)
     add_dependencies(${APP_NAME} Shaders)
 
     # Keep the GLSL sources visible in the IDE next to the rest of the project.
-    target_sources(${APP_NAME} PRIVATE
+    set(GLSL_SOURCE_FILES
             shaders/glsl/PlaneShader.vert
             shaders/glsl/PlaneShader.frag
+            shaders/glsl/PlaneShaderMRT.frag
+            shaders/glsl/Composite.vert
+            shaders/glsl/Composite.frag
+            shaders/glsl/CompositeMRT.frag
     )
-    set_source_files_properties(
-            shaders/glsl/PlaneShader.vert
-            shaders/glsl/PlaneShader.frag
-            PROPERTIES HEADER_FILE_ONLY TRUE
-    )
+    target_sources(${APP_NAME} PRIVATE ${GLSL_SOURCE_FILES})
+    set_source_files_properties(${GLSL_SOURCE_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 endif()
 
 # --- Target Configuration: Include Directories ---

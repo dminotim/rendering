@@ -29,9 +29,6 @@ namespace dmrender {
         std::vector<VkImage> images;
         std::vector<VkImageView> imageViews;
 
-        /// Framebuffers keyed by (render pass, image index); invalidated with the image views.
-        std::map<std::pair<VkRenderPass, uint32_t>, VkFramebuffer> framebuffers;
-
         /// One per frame slot: signalled by vkAcquireNextImageKHR, waited on by the submit.
         std::vector<VkSemaphore> imageAvailableSemaphores;
         /// One per swapchain image: signalled by the submit, waited on by the present.
@@ -245,9 +242,11 @@ namespace dmrender {
 
         m_data->imagesInFlight.assign(actualImageCount, VK_NULL_HANDLE);
 
+        // ImGui builds its pipeline against this one at init time. It only needs compatibility —
+        // one colour attachment of this format — so the clear variant serves either way.
         RenderPassKey key{};
-        key.colorFormat = m_data->imageFormat;
-        key.clearColor = true;
+        key.colors.push_back(RenderPassAttachmentKey{
+            m_data->imageFormat, /*clear=*/true, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR });
         m_data->presentationRenderPass = m_data->device->acquireRenderPass(key);
 
         m_data->needsRecreate = false;
@@ -257,18 +256,17 @@ namespace dmrender {
     {
         VkDevice logicalDevice = m_data->device->logicalDevice();
 
-        for (auto& [key, framebuffer] : m_data->framebuffers) {
-            if (framebuffer) vkDestroyFramebuffer(logicalDevice, framebuffer, nullptr);
-        }
-        m_data->framebuffers.clear();
-
         for (VkSemaphore semaphore : m_data->renderFinishedSemaphores) {
             if (semaphore) vkDestroySemaphore(logicalDevice, semaphore, nullptr);
         }
         m_data->renderFinishedSemaphores.clear();
 
         for (VkImageView view : m_data->imageViews) {
-            if (view) vkDestroyImageView(logicalDevice, view, nullptr);
+            if (!view) continue;
+            // The framebuffer cache lives on the device now, so it has to be told before these
+            // views stop being valid.
+            m_data->device->invalidateFramebuffersUsing(view);
+            vkDestroyImageView(logicalDevice, view, nullptr);
         }
         m_data->imageViews.clear();
         m_data->images.clear();
@@ -375,31 +373,6 @@ namespace dmrender {
         } else if (result != VK_SUCCESS) {
             VkCheck(result, "vkQueuePresentKHR");
         }
-    }
-
-    VkFramebuffer VulkanSwapChain::acquireFramebuffer(uint32_t imageIndex, VkRenderPass renderPass)
-    {
-        const auto key = std::make_pair(renderPass, imageIndex);
-        if (auto it = m_data->framebuffers.find(key); it != m_data->framebuffers.end()) {
-            return it->second;
-        }
-
-        VkImageView attachments[] = { m_data->imageViews[imageIndex] };
-
-        VkFramebufferCreateInfo framebufferInfo{};
-        framebufferInfo.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
-        framebufferInfo.renderPass = renderPass;
-        framebufferInfo.attachmentCount = 1;
-        framebufferInfo.pAttachments = attachments;
-        framebufferInfo.width = m_data->extent.width;
-        framebufferInfo.height = m_data->extent.height;
-        framebufferInfo.layers = 1;
-
-        VkFramebuffer framebuffer = VK_NULL_HANDLE;
-        VkCheck(vkCreateFramebuffer(m_data->device->logicalDevice(), &framebufferInfo, nullptr, &framebuffer),
-                "vkCreateFramebuffer");
-        m_data->framebuffers.emplace(key, framebuffer);
-        return framebuffer;
     }
 
     VkSemaphore VulkanSwapChain::currentImageAvailableSemaphore() const

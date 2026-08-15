@@ -10,6 +10,7 @@
 #include <render_vulkan/VulkanImage.hpp>
 #include <render_vulkan/VulkanPipeline.hpp>
 #include <render_vulkan/VulkanRenderPassDescriptor.hpp>
+#include <render_vulkan/VulkanSampler.hpp>
 #include <render_vulkan/VulkanSwapChain.hpp>
 #include <render_vulkan/VulkanUtils.hpp>
 
@@ -24,6 +25,14 @@ namespace dmrender
         VkDescriptorType descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
     };
 
+    /// @brief One remembered `setTexture` call.
+    struct BoundTexture
+    {
+        VkImageView imageView = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+        VkImageLayout layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    };
+
     struct VulkanCommandBufferData
     {
         std::shared_ptr<CommandQueue> queueRef;   ///< Keeps the queue alive while recording.
@@ -33,6 +42,7 @@ namespace dmrender
 
         VulkanPipeline* pipeline = nullptr;
         std::array<BoundBuffer, kMaxBindingSlots> bindings{};
+        std::array<BoundTexture, kMaxTextureSlots> textures{};
 
         bool renderPassActive = false;
         bool committed = false;
@@ -80,43 +90,62 @@ namespace dmrender
         }
 
         auto* descriptor = static_cast<VulkanRenderPassDescriptor*>(pass.get());
-        const auto& color = descriptor->colorAttachment();
-        if (!color.isValid()) {
-            throw std::runtime_error("beginRenderPass: colour attachment 0 was never set");
+        const uint32_t colorCount = descriptor->colorAttachmentCount();
+        if (colorCount == 0) {
+            throw std::runtime_error("beginRenderPass: no colour attachment was set");
         }
 
-        auto* image = static_cast<VulkanImage*>(color.image.get());
-        VulkanSwapChain* swapChain = image->swapChain();
-        if (!swapChain) {
-            throw std::runtime_error("beginRenderPass: attachment does not come from a swapchain");
+        // Walk every colour attachment once, building the render pass key, the framebuffer's
+        // view list and the clear values together. Each attachment contributes its own format,
+        // load op and resting layout, so a pass may mix a swapchain image with offscreen targets.
+        RenderPassKey key{};
+        std::vector<VkImageView> attachmentViews;
+        std::vector<VkClearValue> clearValues;
+        attachmentViews.reserve(colorCount + 1);
+        clearValues.reserve(colorCount + 1);
+
+        VkExtent2D extent{ 0, 0 };
+
+        for (uint32_t index = 0; index < colorCount; ++index) {
+            const auto& color = descriptor->colorAttachment(index);
+            if (!color.isValid()) {
+                throw std::runtime_error("beginRenderPass: colour attachments must be set from 0 upwards without gaps");
+            }
+
+            auto* image = static_cast<VulkanImage*>(color.image.get());
+
+            if (index == 0) {
+                extent = VkExtent2D{ image->width(), image->height() };
+            } else if (image->width() != extent.width || image->height() != extent.height) {
+                throw std::runtime_error("beginRenderPass: all attachments must have the same size");
+            }
+
+            key.colors.push_back(RenderPassAttachmentKey{
+                ToVkFormat(image->format()), color.clear, image->restingLayout() });
+            attachmentViews.push_back(image->imageView());
+
+            VkClearValue clear{};
+            clear.color = { { color.clearValue.color[0], color.clearValue.color[1],
+                              color.clearValue.color[2], color.clearValue.color[3] } };
+            clearValues.push_back(clear);
         }
 
         const auto& depth = descriptor->depthStencilAttachment();
-
-        RenderPassKey key{};
-        key.colorFormat = ToVkFormat(image->format());
-        key.clearColor = color.clear;
         if (depth.isValid()) {
-            key.depthFormat = ToVkFormat(depth.image->format());
-            key.clearDepth = depth.clear;
-        }
+            auto* depthImage = static_cast<VulkanImage*>(depth.image.get());
+            key.depth = RenderPassAttachmentKey{
+                ToVkFormat(depthImage->format()), depth.clear, depthImage->restingLayout() };
+            attachmentViews.push_back(depthImage->imageView());
 
-        const VkRenderPass renderPass = m_data->device->acquireRenderPass(key);
-        descriptor->setResolvedRenderPass(renderPass);
-        const VkFramebuffer framebuffer = swapChain->acquireFramebuffer(image->imageIndex(), renderPass);
-
-        std::vector<VkClearValue> clearValues;
-        VkClearValue colorClear{};
-        colorClear.color = { { color.clearValue.color[0], color.clearValue.color[1],
-                               color.clearValue.color[2], color.clearValue.color[3] } };
-        clearValues.push_back(colorClear);
-        if (depth.isValid()) {
             VkClearValue depthClear{};
             depthClear.depthStencil = { depth.clearValue.depth, depth.clearValue.stencil };
             clearValues.push_back(depthClear);
         }
 
-        const VkExtent2D extent{ image->width(), image->height() };
+        const VkRenderPass renderPass = m_data->device->acquireRenderPass(key);
+        descriptor->setResolvedRenderPass(renderPass);
+        const VkFramebuffer framebuffer = m_data->device->acquireFramebuffer(
+            renderPass, attachmentViews, extent.width, extent.height);
 
         VkRenderPassBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -192,6 +221,38 @@ namespace dmrender
         };
     }
 
+    void VulkanCommandBuffer::setTexture(uint32_t slot,
+                                         ShaderStage stage,
+                                         const std::shared_ptr<GImage>& image,
+                                         const std::shared_ptr<GSampler>& sampler)
+    {
+        if (!image || !sampler) return;
+        if (slot >= kMaxTextureSlots) {
+            throw std::runtime_error("setTexture: slot is outside the supported range");
+        }
+        if (stage == ShaderStage::Compute) {
+            throw std::runtime_error("setTexture: compute stage is not valid inside a render pass");
+        }
+
+        auto* vulkanImage = static_cast<VulkanImage*>(image.get());
+        if (!hasFlag(vulkanImage->usage(), ImageUsage::Sampled)) {
+            throw std::runtime_error("setTexture: image was not created with ImageUsage::Sampled");
+        }
+
+        auto* vulkanSampler = static_cast<VulkanSampler*>(sampler.get());
+
+        // The image is expected to be in its resting layout, which for a sampled colour target is
+        // SHADER_READ_ONLY_OPTIMAL. Whatever render pass last wrote it left it there, and that
+        // pass's outgoing external dependency made the writes visible to this fragment shader,
+        // so no barrier is needed here. One descriptor binding covers both stages, so the vertex
+        // and fragment calls for the same slot collapse into one write.
+        m_data->textures[slot] = BoundTexture{
+            vulkanImage->imageView(),
+            vulkanSampler->sampler(),
+            vulkanImage->restingLayout()
+        };
+    }
+
     void VulkanCommandBuffer::flushDescriptorSet()
     {
         if (!m_data->pipeline) {
@@ -199,60 +260,89 @@ namespace dmrender
         }
 
         VkDevice logicalDevice = m_data->device->logicalDevice();
-        VkDescriptorSetLayout layout = m_data->pipeline->descriptorSetLayout();
+        VkDescriptorPool pool = m_data->queue->currentDescriptorPool();
 
-        // A fresh set per draw call. Anything else would have to track that third-party code —
-        // the ImGui backend, for one — binds its own sets to the same slot between our draws.
-        VkDescriptorSetAllocateInfo allocInfo{};
-        allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        allocInfo.descriptorPool = m_data->queue->currentDescriptorPool();
-        allocInfo.descriptorSetCount = 1;
-        allocInfo.pSetLayouts = &layout;
+        // Fresh sets per draw call. Anything else would have to track that third-party code —
+        // the ImGui backend, for one — binds its own sets to the same slots between our draws.
+        auto allocate = [&](VkDescriptorSetLayout layout) {
+            VkDescriptorSetAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            allocInfo.descriptorPool = pool;
+            allocInfo.descriptorSetCount = 1;
+            allocInfo.pSetLayouts = &layout;
 
-        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
-        VkCheck(vkAllocateDescriptorSets(logicalDevice, &allocInfo, &descriptorSet),
-                "vkAllocateDescriptorSets (raise kDescriptorSetsPerFrame if the pool ran out)");
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            VkCheck(vkAllocateDescriptorSets(logicalDevice, &allocInfo, &set),
+                    "vkAllocateDescriptorSets (raise kDescriptorSetsPerFrame if the pool ran out)");
+            return set;
+        };
 
-        std::vector<VkDescriptorBufferInfo> bufferInfos;
+        // Both info arrays are sized up front and never grow, so the addresses handed to
+        // VkWriteDescriptorSet stay valid until vkUpdateDescriptorSets consumes them.
+        std::array<VkDescriptorBufferInfo, kMaxBindingSlots> bufferInfos{};
+        std::array<VkDescriptorImageInfo, kMaxTextureSlots> imageInfos{};
         std::vector<VkWriteDescriptorSet> writes;
-        bufferInfos.reserve(kMaxBindingSlots);
-        writes.reserve(kMaxBindingSlots);
+        writes.reserve(kMaxBindingSlots + kMaxTextureSlots);
 
+        // --- set 0: buffers ---
+        VkDescriptorSet bufferSet = VK_NULL_HANDLE;
         for (uint32_t slot = 0; slot < kMaxBindingSlots; ++slot) {
             const BoundBuffer& bound = m_data->bindings[slot];
             if (!bound.buffer) continue;
 
-            VkDescriptorBufferInfo info{};
-            info.buffer = bound.buffer->buffer();
-            info.offset = bound.offset;
-            info.range = bound.buffer->size();
-            bufferInfos.push_back(info);
+            if (!bufferSet) bufferSet = allocate(m_data->pipeline->bufferSetLayout());
+
+            bufferInfos[slot].buffer = bound.buffer->buffer();
+            bufferInfos[slot].offset = bound.offset;
+            bufferInfos[slot].range = bound.buffer->size();
 
             VkWriteDescriptorSet write{};
             write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            write.dstSet = descriptorSet;
+            write.dstSet = bufferSet;
             write.dstBinding = slot;
             write.dstArrayElement = 0;
             write.descriptorCount = 1;
             write.descriptorType = bound.descriptorType;
+            write.pBufferInfo = &bufferInfos[slot];
             writes.push_back(write);
         }
 
-        // pBufferInfo is filled only now: the vector reallocates while it grows, so pointers
-        // taken during the loop above could dangle.
-        for (size_t i = 0; i < writes.size(); ++i) {
-            writes[i].pBufferInfo = &bufferInfos[i];
+        // --- set 1: textures ---
+        VkDescriptorSet textureSet = VK_NULL_HANDLE;
+        for (uint32_t slot = 0; slot < kMaxTextureSlots; ++slot) {
+            const BoundTexture& bound = m_data->textures[slot];
+            if (!bound.imageView) continue;
+
+            if (!textureSet) textureSet = allocate(m_data->pipeline->textureSetLayout());
+
+            imageInfos[slot].imageView = bound.imageView;
+            imageInfos[slot].sampler = bound.sampler;
+            imageInfos[slot].imageLayout = bound.layout;
+
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = textureSet;
+            write.dstBinding = slot;
+            write.dstArrayElement = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &imageInfos[slot];
+            writes.push_back(write);
         }
 
         if (!writes.empty()) {
             vkUpdateDescriptorSets(logicalDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
         }
 
-        vkCmdBindDescriptorSets(m_data->cmdBuffer,
-                                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                m_data->pipeline->pipelineLayout(),
-                                0, 1, &descriptorSet,
-                                0, nullptr);
+        VkPipelineLayout pipelineLayout = m_data->pipeline->pipelineLayout();
+        if (bufferSet) {
+            vkCmdBindDescriptorSets(m_data->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                    kBufferDescriptorSet, 1, &bufferSet, 0, nullptr);
+        }
+        if (textureSet) {
+            vkCmdBindDescriptorSets(m_data->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,
+                                    kTextureDescriptorSet, 1, &textureSet, 0, nullptr);
+        }
     }
 
     void VulkanCommandBuffer::draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance)

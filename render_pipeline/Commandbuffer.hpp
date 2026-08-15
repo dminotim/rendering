@@ -8,6 +8,7 @@
 #include "RenderPassDescriptor.hpp"
 #include "Pipeline.hpp"
 #include "GBuffer.hpp"
+#include "GSampler.hpp"
 
 namespace dmrender {
 
@@ -69,6 +70,29 @@ namespace dmrender {
          * @param offset An offset in bytes from the beginning of the buffer.
          */
         virtual void setUniformBuffer(uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset = 0) = 0;
+
+        /**
+         * @brief Binds a texture and its sampler to a specified slot for a given shader stage.
+         * @pre A render pass must be active.
+         * @pre The image must have been created with ImageUsage::Sampled.
+         * @param slot The binding slot for the texture in the shader.
+         * @param stage The shader stage the texture will be read from.
+         * @param image The image to sample.
+         * @param sampler The sampling state to read it with.
+         *
+         * @note Texture slots are a separate numbering space from buffer slots — texture slot 0
+         *       and uniform buffer slot 0 are two different bindings. This matches Metal, where
+         *       `[[texture(0)]]` and `[[buffer(0)]]` are unrelated, and is why the Vulkan backend
+         *       puts textures in their own descriptor set.
+         *
+         * @warning Reading an image that an earlier pass in this command buffer wrote is
+         *          supported and correctly synchronised. Reading one that is *also* an attachment
+         *          of the currently active render pass is not.
+         */
+        virtual void setTexture(uint32_t slot,
+                                ShaderStage stage,
+                                const std::shared_ptr<GImage>& image,
+                                const std::shared_ptr<GSampler>& sampler) = 0;
 
         /**
          * @brief Records a non-indexed drawing command.

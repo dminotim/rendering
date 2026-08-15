@@ -7,6 +7,8 @@ namespace dmrender {
     struct MetalRenderPassDescriptorNativeData
     {
         MTLRenderPassDescriptor* m_pass;
+        /// One past the highest index ever passed to setColorAttachment().
+        uint32_t m_colorCount = 0;
     };
     MetalRenderPassDescriptor::MetalRenderPassDescriptor()
     :m_data(std::make_unique<MetalRenderPassDescriptorNativeData>()){
@@ -24,6 +26,11 @@ namespace dmrender {
                                                        const std::shared_ptr<GImage>& image,
                                                        bool clear,
                                                        const ClearValue& clearValue) {
+        if (index >= kMaxColorAttachments) {
+            NSLog(@"[ERROR] MetalRenderPassDescriptor: colour attachment index is out of range");
+            return;
+        }
+
         auto* attachment = m_data->m_pass.colorAttachments[index];
 
         auto* metalImage = static_cast<MetalImage*>(image.get());
@@ -33,6 +40,14 @@ namespace dmrender {
         attachment.loadAction = clear ? MTLLoadActionClear : MTLLoadActionLoad;
         attachment.storeAction = MTLStoreActionStore;
         attachment.clearColor = MTLClearColorMake(clearValue.color[0], clearValue.color[1], clearValue.color[2], clearValue.color[3]);
+
+        if (index + 1 > m_data->m_colorCount) {
+            m_data->m_colorCount = index + 1;
+        }
+    }
+
+    uint32_t MetalRenderPassDescriptor::colorAttachmentCount() const {
+        return m_data->m_colorCount;
     }
 
     void MetalRenderPassDescriptor::setDepthStencilAttachment(const std::shared_ptr<GImage>& image,

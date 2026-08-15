@@ -52,3 +52,46 @@ constexpr float4 paperColor = float4(0.98, 0.98, 0.96, 1.0);
 
 return isLine ? lineColor : paperColor;
 }
+
+// ─────────────────────────────────────────────────────────────
+// MRT-вариант того же фрагментного шейдера.
+//
+// Пишет в два аттачмента одновременно: [[color(0)]] — та же сетка, что и выше,
+// [[color(1)]] — «тепловая карта» расстояния до ближайшей линии. Обе цели
+// объявлены в RenderTargetFormat::colorFormats, и их количество должно совпадать
+// с числом выходов здесь.
+// ─────────────────────────────────────────────────────────────
+
+struct PlaneMRTOut {
+    float4 grid     [[color(0)]];
+    float4 distance [[color(1)]];
+};
+
+fragment PlaneMRTOut plane_fragment_shader_mrt(
+        VertexOut in [[stage_in]],
+constant Uniforms& uniforms [[buffer(1)]]
+) {
+float2 screen = in.clipSpacePosition.xy;
+float2 world = screen - float2(uniforms.pan[0], uniforms.pan[1]);
+const float   cellSizePx   = 50.0;
+const float   lineWidthPx  = 2.0;
+
+float worldCellSize  = cellSizePx  * uniforms.scale;
+float worldLineWidth = lineWidthPx;
+float2 cell   = fract(world / worldCellSize) * worldCellSize;
+
+bool isLine =
+        (cell.x < worldLineWidth) || (cell.y < worldLineWidth);
+
+constexpr float4 lineColor  = float4(0.60, 0.75, 0.95, 1.0);
+constexpr float4 paperColor = float4(0.98, 0.98, 0.96, 1.0);
+
+// Нормированное расстояние до ближайшей линии сетки, 0 на линии, 1 в центре ячейки.
+float2 toEdge = min(cell, worldCellSize - cell);
+float  nearest = min(toEdge.x, toEdge.y) / max(worldCellSize * 0.5, 1e-4);
+
+PlaneMRTOut out;
+out.grid = isLine ? lineColor : paperColor;
+out.distance = float4(nearest, 1.0 - nearest, 0.35, 1.0);
+return out;
+}

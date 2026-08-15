@@ -33,6 +33,20 @@ public:
             const std::string& debugName
     ) override;
 
+    std::shared_ptr<GImage> createImage(
+            ImageType type,
+            ImageFormat format,
+            uint32_t width,
+            uint32_t height,
+            ImageUsage usage,
+            const std::string& debugName
+    ) override;
+
+    std::shared_ptr<GSampler> createSampler(
+            const SamplerDesc& desc,
+            const std::string& debugName
+    ) override;
+
     void* nativeHandle() const override;
 
     MetalDevice(DeviceId id, void* nativeDevice);

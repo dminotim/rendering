@@ -1,6 +1,9 @@
 #include "MetalImage.hpp"
 #import "MetalCommandQueues.hpp"
+#import "MetalUtilsCpp.hpp"
+#import "Device.hpp"
 
+#include <stdexcept>
 
 namespace dmrender {
 
@@ -20,6 +23,50 @@ namespace dmrender {
               m_type(type),
               m_debugName(debugName)
     {
+    }
+
+    MetalImage::MetalImage(Device* device,
+                           ImageType type,
+                           ImageFormat format,
+                           uint32_t width,
+                           uint32_t height,
+                           ImageUsage usage,
+                           const std::string& debugName)
+            : m_drawable(nil),
+              m_format(format),
+              m_usage(usage),
+              m_type(type),
+              m_debugName(debugName)
+    {
+        if (width == 0 || height == 0) {
+            throw std::runtime_error("MetalImage: zero sized image");
+        }
+
+        auto mtlDevice = (__bridge id<MTLDevice>)device->nativeHandle();
+
+        MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
+        descriptor.textureType = ToMTLTextureType(type);
+        descriptor.pixelFormat = ToMTLPixelFormat(format);
+        descriptor.width = width;
+        descriptor.height = height;
+        descriptor.depth = 1;
+        descriptor.mipmapLevelCount = 1;
+        descriptor.arrayLength = 1;
+        descriptor.usage = ToMTLTextureUsage(usage);
+        // A render target lives entirely on the GPU; Private is both the fastest option and the
+        // only one that allows lossless compression for an attachment.
+        descriptor.storageMode = MTLStorageModePrivate;
+
+        // newTextureWithDescriptor: returns a +1 retained object that this class owns.
+        m_texture = [mtlDevice newTextureWithDescriptor:descriptor];
+        [descriptor release];
+
+        if (!m_texture) {
+            throw std::runtime_error("MetalImage: failed to create MTLTexture");
+        }
+        if (!debugName.empty()) {
+            m_texture.label = [NSString stringWithUTF8String:debugName.c_str()];
+        }
     }
 
     MetalImage:: ~MetalImage() {

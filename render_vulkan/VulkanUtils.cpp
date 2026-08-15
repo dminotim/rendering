@@ -69,6 +69,50 @@ namespace dmrender {
         }
     }
 
+    VkFilter ToVkFilter(SamplerFilter filter)
+    {
+        return (filter == SamplerFilter::Nearest) ? VK_FILTER_NEAREST : VK_FILTER_LINEAR;
+    }
+
+    VkSamplerAddressMode ToVkAddressMode(SamplerAddressMode mode)
+    {
+        switch (mode) {
+            case SamplerAddressMode::Repeat:         return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+            case SamplerAddressMode::MirroredRepeat: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+            case SamplerAddressMode::ClampToEdge:
+            default:                                 return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        }
+    }
+
+    VkImageUsageFlags ToVkImageUsage(ImageUsage usage)
+    {
+        VkImageUsageFlags flags = 0;
+        if (hasFlag(usage, ImageUsage::Sampled))      flags |= VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (hasFlag(usage, ImageUsage::Storage))      flags |= VK_IMAGE_USAGE_STORAGE_BIT;
+        if (hasFlag(usage, ImageUsage::ColorTarget))  flags |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (hasFlag(usage, ImageUsage::DepthStencil)) flags |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if (hasFlag(usage, ImageUsage::TransferSrc))  flags |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        if (hasFlag(usage, ImageUsage::TransferDst))  flags |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        return flags;
+    }
+
+    VkImageLayout RestingLayoutFor(ImageUsage usage, bool isSwapChainImage)
+    {
+        // A swapchain image always goes back to the presentation engine.
+        if (isSwapChainImage) return VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+
+        if (hasFlag(usage, ImageUsage::DepthStencil)) {
+            return VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        }
+        // A colour target that will also be sampled rests in the layout the sampler needs, so a
+        // render pass writing it and a later pass reading it need no barrier between them — the
+        // render pass's own final layout and external dependency do the work.
+        if (hasFlag(usage, ImageUsage::Sampled)) {
+            return VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+        return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+
     uint32_t FindMemoryType(VkPhysicalDevice physicalDevice,
                             uint32_t typeFilter,
                             VkMemoryPropertyFlags properties)

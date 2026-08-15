@@ -1,12 +1,16 @@
 #include "VulkanRenderPassDescriptor.hpp"
 
+#include <algorithm>
+#include <array>
 #include <stdexcept>
 
 namespace dmrender {
 
     struct VulkanRenderPassDescriptorNativeData
     {
-        VulkanRenderPassDescriptor::Attachment color;
+        std::array<VulkanRenderPassDescriptor::Attachment, kMaxColorAttachments> colors;
+        /// One past the highest index ever passed to setColorAttachment().
+        uint32_t colorCount = 0;
         VulkanRenderPassDescriptor::Attachment depthStencil;
         bool clearStencil = false;
         VkRenderPass resolvedRenderPass = VK_NULL_HANDLE;
@@ -24,14 +28,18 @@ namespace dmrender {
                                                         bool clear,
                                                         const ClearValue& clearValue)
     {
-        if (index != 0) {
-            // Multiple render targets would need one VkAttachmentDescription per index and a
-            // wider RenderPassKey; the interface allows it, this backend does not yet.
-            throw std::runtime_error("VulkanRenderPassDescriptor: only colour attachment 0 is supported");
+        if (index >= kMaxColorAttachments) {
+            throw std::runtime_error("VulkanRenderPassDescriptor: colour attachment index is out of range");
         }
-        m_data->color.image = image;
-        m_data->color.clear = clear;
-        m_data->color.clearValue = clearValue;
+        m_data->colors[index].image = image;
+        m_data->colors[index].clear = clear;
+        m_data->colors[index].clearValue = clearValue;
+        m_data->colorCount = std::max(m_data->colorCount, index + 1);
+    }
+
+    uint32_t VulkanRenderPassDescriptor::colorAttachmentCount() const
+    {
+        return m_data->colorCount;
     }
 
     void VulkanRenderPassDescriptor::setDepthStencilAttachment(const std::shared_ptr<GImage>& image,
@@ -52,9 +60,12 @@ namespace dmrender {
         return (void*)&m_data->resolvedRenderPass;
     }
 
-    const VulkanRenderPassDescriptor::Attachment& VulkanRenderPassDescriptor::colorAttachment() const
+    const VulkanRenderPassDescriptor::Attachment& VulkanRenderPassDescriptor::colorAttachment(uint32_t index) const
     {
-        return m_data->color;
+        if (index >= kMaxColorAttachments) {
+            throw std::runtime_error("VulkanRenderPassDescriptor: colour attachment index is out of range");
+        }
+        return m_data->colors[index];
     }
 
     const VulkanRenderPassDescriptor::Attachment& VulkanRenderPassDescriptor::depthStencilAttachment() const

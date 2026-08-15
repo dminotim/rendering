@@ -13,20 +13,32 @@
 
 namespace dmrender {
 
+    class VulkanDevice;
     class VulkanSwapChain;
     struct VulkanImageNativeData;
 
     /**
      * @class VulkanImage
-     * @brief GImage view over one swapchain image.
+     * @brief GImage over either a swapchain image or a device-owned texture.
      *
-     * This is the counterpart of MetalImage wrapping a CAMetalDrawable: it does not own the
-     * VkImage or the VkImageView, the swapchain does. It only carries enough context for the
-     * render pass descriptor to find a framebuffer and for `CommandBuffer::present()` to know
-     * which swapchain image to hand back to the presentation engine.
+     * The two cases differ only in ownership and in one piece of state:
+     *
+     *  - **Swapchain image.** Non-owning, exactly like MetalImage wrapping a CAMetalDrawable.
+     *    The swapchain owns the VkImage and VkImageView. Its resting layout is PRESENT_SRC_KHR
+     *    and `nativeDrawableHandle()` returns the owning swapchain, which is what
+     *    `CommandBuffer::present()` needs.
+     *
+     *  - **Offscreen texture.** Owns a VkImage, its VkDeviceMemory and a VkImageView, created
+     *    through `Device::createImage()`. Its resting layout follows from its usage, and
+     *    `nativeDrawableHandle()` returns nullptr — it can never be presented.
+     *
+     * The resting layout is the whole of this backend's layout tracking. Every render pass leaves
+     * its attachments in it and, when not clearing, expects to find them in it, so writing a
+     * target in one pass and sampling it in the next needs no explicit barrier.
      */
     class VulkanImage : public GImage {
     public:
+        /// @brief Constructs a non-owning view over a swapchain image.
         VulkanImage(VulkanSwapChain* swapChain,
                     uint32_t imageIndex,
                     VkImage image,
@@ -37,6 +49,15 @@ namespace dmrender {
                     ImageUsage usage,
                     ImageType type,
                     const std::string& debugName = "");
+
+        /// @brief Creates and owns an offscreen image, its memory and its view.
+        VulkanImage(VulkanDevice* device,
+                    ImageType type,
+                    ImageFormat format,
+                    uint32_t width,
+                    uint32_t height,
+                    ImageUsage usage,
+                    const std::string& debugName);
 
         ~VulkanImage() override;
 
@@ -53,8 +74,7 @@ namespace dmrender {
 
         /**
          * @brief Vulkan's stand-in for a CAMetalDrawable.
-         * @return The owning VulkanSwapChain, which together with imageIndex() identifies
-         *         exactly what `vkQueuePresentKHR` has to be told.
+         * @return The owning VulkanSwapChain for a swapchain image, nullptr for an offscreen one.
          */
         void* nativeDrawableHandle() const override;
 
@@ -62,8 +82,15 @@ namespace dmrender {
         void setDebugName(const std::string& name) override;
 
         VkImageView imageView() const;
+
+        /// @brief Valid only for swapchain images; 0 otherwise.
         uint32_t imageIndex() const;
+
+        /// @brief The owning swapchain, or nullptr for an offscreen image.
         VulkanSwapChain* swapChain() const;
+
+        /// @brief The layout this image sits in between render passes. See the class docs.
+        VkImageLayout restingLayout() const;
 
     private:
         std::unique_ptr<VulkanImageNativeData> m_data;

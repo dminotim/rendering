@@ -5,6 +5,9 @@
 #ifndef RENDERING_PIPELINE_HPP
 #define RENDERING_PIPELINE_HPP
 
+#include <initializer_list>
+#include <vector>
+
 #include "GImage.hpp" // For ImageFormat
 
 namespace dmrender {
@@ -12,13 +15,20 @@ namespace dmrender {
     /**
      * @struct RenderTargetFormat
      * @brief Describes the pixel formats of render targets that a pipeline will write to.
+     *
+     * A pipeline is only valid inside a render pass whose attachments match this description,
+     * so the number of colour formats here must equal the number of colour attachments the
+     * render pass declares, and equal the number of outputs the fragment shader writes.
+     * A shader writing two outputs cannot be used with a single-attachment pipeline.
      */
     struct RenderTargetFormat {
         /**
-          * @brief The pixel format of the primary color attachment.
-          * @note For multiple render targets (MRT), this could be expanded to a std::vector.
-          */
-        ImageFormat colorFormat = ImageFormat::Undefined;
+         * @brief The pixel format of each colour attachment, in fragment shader output order.
+         *
+         * Entry @c i corresponds to `[[color(i)]]` in Metal and `layout(location = i) out` in
+         * GLSL. Must hold between 1 and @c kMaxColorAttachments entries.
+         */
+        std::vector<ImageFormat> colorFormats;
 
         /**
          * @brief The pixel format of the depth attachment.
@@ -30,6 +40,28 @@ namespace dmrender {
          * @note Often the same as the depth attachment if a combined depth/stencil format is used.
          */
         ImageFormat stencilFormat = ImageFormat::Undefined;
+
+        /**
+         * @brief Convenience builder for the common single render target case.
+         * @param color The colour attachment format.
+         * @param depth An optional depth attachment format.
+         */
+        static RenderTargetFormat singleTarget(ImageFormat color,
+                                               ImageFormat depth = ImageFormat::Undefined)
+        {
+            return RenderTargetFormat{ {color}, depth, ImageFormat::Undefined };
+        }
+
+        /**
+         * @brief Convenience builder for multiple render targets.
+         * @param colors The colour attachment formats, in output order.
+         * @param depth An optional depth attachment format.
+         */
+        static RenderTargetFormat multiTarget(std::initializer_list<ImageFormat> colors,
+                                              ImageFormat depth = ImageFormat::Undefined)
+        {
+            return RenderTargetFormat{ std::vector<ImageFormat>(colors), depth, ImageFormat::Undefined };
+        }
     };
 
     /**
