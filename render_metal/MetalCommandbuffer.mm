@@ -116,6 +116,34 @@ namespace dmrender {
         }
     }
 
+    void MetalCommandBuffer::setTexture(uint32_t slot, ShaderStage stage, const std::shared_ptr<GImage>& image,
+                                        const std::shared_ptr<GSampler>& sampler)
+    {
+        assert(m_data->m_encoder != nil && "No active render pass.");
+        if (!image || !sampler) return;
+
+        // Metal numbers textures independently of buffers, so `slot` here is the [[texture(n)]]
+        // index and has nothing to do with the [[buffer(n)]] index of the same number. The Vulkan
+        // backend reproduces that by putting textures in their own descriptor set.
+        id<MTLTexture> mtlTexture = (__bridge id<MTLTexture>)image->nativeHandle();
+        id<MTLSamplerState> mtlSampler = (__bridge id<MTLSamplerState>)sampler->nativeHandle();
+
+        switch (stage) {
+            case ShaderStage::Vertex:
+                [m_data->m_encoder setVertexTexture:mtlTexture atIndex:slot];
+                [m_data->m_encoder setVertexSamplerState:mtlSampler atIndex:slot];
+                break;
+            case ShaderStage::Fragment:
+                [m_data->m_encoder setFragmentTexture:mtlTexture atIndex:slot];
+                [m_data->m_encoder setFragmentSamplerState:mtlSampler atIndex:slot];
+                break;
+            case ShaderStage::Compute:
+                NSLog(@"[ERROR] Trying to set a texture for Compute stage on a RenderCommandEncoder.");
+                assert(false && "Invalid shader stage for render command encoder");
+                break;
+        }
+    }
+
     void MetalCommandBuffer::draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance)
     {
         assert(m_data->m_encoder != nil && "No active render pass.");

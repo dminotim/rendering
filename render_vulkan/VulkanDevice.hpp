@@ -17,6 +17,20 @@ namespace dmrender {
     struct VulkanDeviceNativeData;
 
     /**
+     * @struct RenderPassAttachmentKey
+     * @brief One attachment's contribution to a render pass's identity.
+     */
+    struct RenderPassAttachmentKey {
+        VkFormat format = VK_FORMAT_UNDEFINED;
+        /// True when the pass clears this attachment; false means its contents are loaded.
+        bool clear = true;
+        /// The layout the attachment rests in outside the pass. See VulkanImage::restingLayout().
+        VkImageLayout restingLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        bool operator<(const RenderPassAttachmentKey& other) const;
+    };
+
+    /**
      * @struct RenderPassKey
      * @brief Everything a VkRenderPass object depends on in this backend.
      *
@@ -24,16 +38,20 @@ namespace dmrender {
      * object instead, and creating one per frame would be wasteful. The device therefore
      * caches render passes by the small set of properties that actually change.
      *
+     * With multiple render targets the identity grows a colour attachment per output, each with
+     * its own format, load op and resting layout — a pass writing a swapchain image and an
+     * offscreen texture at once has two different resting layouts in one key.
+     *
      * @note Two render passes are "compatible" (in the Vulkan sense used by pipelines and by
-     *       the ImGui backend) when their attachment formats and sample counts match, load and
-     *       store ops are irrelevant. That is why a pipeline can be built against the cached
-     *       clear-variant and still be used inside the load-variant.
+     *       the ImGui backend) when their attachment counts, formats and sample counts match;
+     *       load ops and layouts are irrelevant. That is why a pipeline can be built against the
+     *       cached clear-variant and still be used inside the load-variant.
      */
     struct RenderPassKey {
-        VkFormat colorFormat = VK_FORMAT_UNDEFINED;
-        VkFormat depthFormat = VK_FORMAT_UNDEFINED;
-        bool clearColor = true;
-        bool clearDepth = true;
+        /// One entry per colour attachment, in fragment shader output order.
+        std::vector<RenderPassAttachmentKey> colors;
+        /// Format VK_FORMAT_UNDEFINED means the pass has no depth attachment.
+        RenderPassAttachmentKey depth;
 
         bool operator<(const RenderPassKey& other) const;
     };
@@ -59,6 +77,20 @@ namespace dmrender {
             const std::string& debugName
         ) override;
 
+        std::shared_ptr<GImage> createImage(
+            ImageType type,
+            ImageFormat format,
+            uint32_t width,
+            uint32_t height,
+            ImageUsage usage,
+            const std::string& debugName
+        ) override;
+
+        std::shared_ptr<GSampler> createSampler(
+            const SamplerDesc& desc,
+            const std::string& debugName
+        ) override;
+
         void* nativeHandle() const override;
         void* getLogicalDevice() const;
         uint32_t getGraphicsFamilyIndex() const;
@@ -75,6 +107,29 @@ namespace dmrender {
          * @note The device owns the returned handle; do not destroy it.
          */
         VkRenderPass acquireRenderPass(const RenderPassKey& key);
+
+        /**
+         * @brief Returns a cached VkFramebuffer for @p attachments, creating it on first use.
+         *
+         * The cache lives on the device rather than on the swapchain because a framebuffer may
+         * now be built entirely out of offscreen images that no swapchain knows about. Whoever
+         * destroys an image view is responsible for calling invalidateFramebuffersUsing() first.
+         *
+         * @param renderPass A render pass the framebuffer must be compatible with.
+         * @param attachments The image views, colour attachments first then depth.
+         * @param width Framebuffer width in pixels.
+         * @param height Framebuffer height in pixels.
+         */
+        VkFramebuffer acquireFramebuffer(VkRenderPass renderPass,
+                                         const std::vector<VkImageView>& attachments,
+                                         uint32_t width,
+                                         uint32_t height);
+
+        /**
+         * @brief Destroys every cached framebuffer that references @p view.
+         * @note Must be called before the view itself is destroyed, and after the device is idle.
+         */
+        void invalidateFramebuffersUsing(VkImageView view);
 
         /**
          * @brief Index of the frame slot currently being recorded, in [0, kFramesInFlight).

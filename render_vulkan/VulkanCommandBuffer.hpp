@@ -24,10 +24,11 @@ namespace dmrender {
      * `commit()` closes it, submits it and presents, then hands the slot back to the queue.
      *
      * @par Deferred binding
-     * `setVertexBuffer()` and `setUniformBuffer()` only remember what was bound. The actual
-     * descriptor set is allocated, written and bound lazily on the next draw call, because Vulkan
-     * needs the pipeline's descriptor set layout — which is only known once a pipeline is set —
-     * and because a set can then cover every slot in one `vkUpdateDescriptorSets`.
+     * `setVertexBuffer()`, `setUniformBuffer()` and `setTexture()` only remember what was bound.
+     * The actual descriptor sets are allocated, written and bound lazily on the next draw call,
+     * because Vulkan needs the pipeline's descriptor set layouts — only known once a pipeline is
+     * set — and because one `vkUpdateDescriptorSets` can then cover every slot at once. Buffers
+     * land in set 0 and textures in set 1; a set with nothing bound is never allocated.
      */
     class VulkanCommandBuffer : public CommandBuffer {
     public:
@@ -40,6 +41,9 @@ namespace dmrender {
             uint32_t slot, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
         void setUniformBuffer(
             uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
+        void setTexture(
+            uint32_t slot, ShaderStage stage, const std::shared_ptr<GImage>& image,
+            const std::shared_ptr<GSampler>& sampler) override;
 
         void draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) override;
         void drawIndexed(const std::shared_ptr<GBuffer>& indexBuffer,

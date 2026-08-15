@@ -19,10 +19,20 @@ namespace dmrender
         auto vs = (__bridge id<MTLFunction>)vertexFunction->nativeHandle();
         auto fs = (__bridge id<MTLFunction>)fragmentFunction->nativeHandle();
 
+        if (targetFormat.colorFormats.empty()) {
+            NSLog(@"MetalPipeline Error: RenderTargetFormat needs at least one colour format");
+            m_data->m_pipelineState = nullptr;
+            return;
+        }
+
         MTLRenderPipelineDescriptor* desc = [[MTLRenderPipelineDescriptor alloc] init];
         desc.vertexFunction = vs;
         desc.fragmentFunction = fs;
-        desc.colorAttachments[0].pixelFormat = ToMTLPixelFormat(targetFormat.colorFormat);
+        // One entry per fragment shader output: colorAttachments[i] pairs with [[color(i)]].
+        // The count and the formats must match the render pass this pipeline runs inside.
+        for (size_t i = 0; i < targetFormat.colorFormats.size(); ++i) {
+            desc.colorAttachments[i].pixelFormat = ToMTLPixelFormat(targetFormat.colorFormats[i]);
+        }
         if (targetFormat.depthFormat != ImageFormat::Undefined)
             desc.depthAttachmentPixelFormat = ToMTLPixelFormat(targetFormat.depthFormat);
         if (targetFormat.stencilFormat != ImageFormat::Undefined)

@@ -23,6 +23,9 @@ namespace dmrender {
                 uint32_t slot, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
         void setUniformBuffer(
                 uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
+        void setTexture(
+                uint32_t slot, ShaderStage stage, const std::shared_ptr<GImage>& image,
+                const std::shared_ptr<GSampler>& sampler) override;
 
         // --- Команды отрисовки ---
         void draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) override;

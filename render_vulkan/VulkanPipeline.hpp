@@ -30,15 +30,25 @@ namespace dmrender {
      * `gl_VertexIndex`, so the pipeline declares zero vertex bindings and zero attributes and the
      * two backends stay byte-for-byte equivalent without widening the public API.
      *
-     * @par Binding model (descriptor set 0)
-     * A slot number in `CommandBuffer::setVertexBuffer()` / `setUniformBuffer()` *is* the Vulkan
-     * binding number, the same way it is the Metal `[[buffer(n)]]` index:
+     * @par Binding model
+     * A slot number in `CommandBuffer::setVertexBuffer()` / `setUniformBuffer()` / `setTexture()`
+     * *is* the Vulkan binding number, the same way it is the Metal `[[buffer(n)]]` or
+     * `[[texture(n)]]` index. Because Metal numbers buffers and textures independently, the two
+     * live in separate descriptor sets here:
      *
-     *   - binding 0            : storage buffer, vertex stage   <- setVertexBuffer(0, ...)
-     *   - binding 1 .. N-1     : uniform buffer, vertex+fragment <- setUniformBuffer(n, ...)
+     *   set 0, binding 0        : storage buffer, vertex stage    <- setVertexBuffer(0, ...)
+     *   set 0, binding 1 .. N-1 : uniform buffer, vertex+fragment <- setUniformBuffer(n, ...)
+     *   set 1, binding 0 .. N-1 : combined image sampler          <- setTexture(n, ...)
      *
      * Every slot is declared in the layout whether or not a shader uses it, so one layout serves
-     * any shader pair that respects the convention. Unused bindings simply go unwritten.
+     * any shader pair that respects the convention. Unused bindings simply go unwritten, and a
+     * set with nothing bound is never allocated.
+     *
+     * @par Multiple render targets
+     * `RenderTargetFormat::colorFormats` drives both the blend state (Vulkan wants one entry per
+     * attachment) and the render pass the pipeline is validated against. A pipeline built for two
+     * colour formats can only run inside a render pass with two colour attachments, and its
+     * fragment shader must write exactly two outputs.
      *
      * @par Fixed state
      * The remaining state is pinned to Metal's defaults so both backends rasterise identically:
@@ -62,7 +72,10 @@ namespace dmrender {
 
         VkPipeline pipeline() const;
         VkPipelineLayout pipelineLayout() const;
-        VkDescriptorSetLayout descriptorSetLayout() const;
+        /// @brief Layout of descriptor set 0 (buffers).
+        VkDescriptorSetLayout bufferSetLayout() const;
+        /// @brief Layout of descriptor set 1 (combined image samplers).
+        VkDescriptorSetLayout textureSetLayout() const;
 
     private:
         std::unique_ptr<VulkanPipelineNativeData> m_data;

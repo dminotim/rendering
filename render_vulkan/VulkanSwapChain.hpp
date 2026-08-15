@@ -37,8 +37,9 @@ namespace dmrender {
      * command buffer and descriptor pool reuse. `acquireNextImage()` asks the queue to open the
      * frame before touching the swapchain.
      *
-     * Framebuffers are cached here as well: they reference swapchain image views, so they must
-     * die together with them on `recreate()`.
+     * Framebuffers are cached on the device, since a render pass may target offscreen images
+     * only. This class is still responsible for calling `invalidateFramebuffersUsing()` for each
+     * of its image views before destroying them in `recreate()`.
      */
     class VulkanSwapChain : public SwapChain {
     public:
@@ -66,9 +67,6 @@ namespace dmrender {
 
         /// @brief Presents the image acquired this frame; called from VulkanCommandBuffer::commit().
         void present(uint32_t imageIndex, VkSemaphore waitSemaphore);
-
-        /// @brief Framebuffer for @p imageIndex compatible with @p renderPass, created on demand.
-        VkFramebuffer acquireFramebuffer(uint32_t imageIndex, VkRenderPass renderPass);
 
         /// @brief Semaphore vkAcquireNextImageKHR signalled for the frame being recorded.
         VkSemaphore currentImageAvailableSemaphore() const;

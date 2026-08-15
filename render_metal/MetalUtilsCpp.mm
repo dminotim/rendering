@@ -28,4 +28,38 @@ namespace dmrender {
                 return MTLPixelFormatInvalid;
         }
     }
+
+    MTLTextureUsage ToMTLTextureUsage(ImageUsage usage) {
+        MTLTextureUsage flags = MTLTextureUsageUnknown;
+        if (hasFlag(usage, ImageUsage::Sampled))      flags |= MTLTextureUsageShaderRead;
+        if (hasFlag(usage, ImageUsage::Storage))      flags |= MTLTextureUsageShaderWrite;
+        if (hasFlag(usage, ImageUsage::ColorTarget))  flags |= MTLTextureUsageRenderTarget;
+        if (hasFlag(usage, ImageUsage::DepthStencil)) flags |= MTLTextureUsageRenderTarget;
+        // TransferSrc/TransferDst need no usage flag: Metal blit encoders can copy any texture.
+        return flags;
+    }
+
+    MTLTextureType ToMTLTextureType(ImageType type) {
+        switch (type) {
+            case ImageType::Image1D: return MTLTextureType1D;
+            case ImageType::Image3D: return MTLTextureType3D;
+            case ImageType::CubeMap: return MTLTextureTypeCube;
+            case ImageType::Image2D:
+            default:                 return MTLTextureType2D;
+        }
+    }
+
+    MTLSamplerMinMagFilter ToMTLSamplerMinMagFilter(SamplerFilter filter) {
+        return (filter == SamplerFilter::Nearest) ? MTLSamplerMinMagFilterNearest
+                                                  : MTLSamplerMinMagFilterLinear;
+    }
+
+    MTLSamplerAddressMode ToMTLSamplerAddressMode(SamplerAddressMode mode) {
+        switch (mode) {
+            case SamplerAddressMode::Repeat:         return MTLSamplerAddressModeRepeat;
+            case SamplerAddressMode::MirroredRepeat: return MTLSamplerAddressModeMirrorRepeat;
+            case SamplerAddressMode::ClampToEdge:
+            default:                                 return MTLSamplerAddressModeClampToEdge;
+        }
+    }
 }

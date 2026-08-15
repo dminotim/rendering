@@ -1,5 +1,7 @@
 #include "MetalDevice.hpp"
 #import "MetalBuffer.hpp"
+#import "MetalImage.hpp"
+#import "MetalSampler.hpp"
 
 #import <Metal/Metal.h>
 #import <iostream>
@@ -122,6 +124,34 @@ namespace dmrender
             return nullptr;
         }
         return std::make_shared<MetalBuffer>(this, type, usage, size, initialData, debugName);
+    }
+
+    std::shared_ptr<GImage> MetalDevice::createImage(
+            ImageType type,
+            ImageFormat format,
+            uint32_t width,
+            uint32_t height,
+            ImageUsage usage,
+            const std::string& debugName
+    ) {
+        assert(m_data->m_device != nullptr && "Cannot create image with a null native device.");
+        if (!m_data->m_device) {
+            std::cerr << "MetalDevice::createImage Error: Native device is null." << std::endl;
+            return nullptr;
+        }
+        return std::make_shared<MetalImage>(this, type, format, width, height, usage, debugName);
+    }
+
+    std::shared_ptr<GSampler> MetalDevice::createSampler(
+            const SamplerDesc& desc,
+            const std::string& debugName
+    ) {
+        assert(m_data->m_device != nullptr && "Cannot create sampler with a null native device.");
+        if (!m_data->m_device) {
+            std::cerr << "MetalDevice::createSampler Error: Native device is null." << std::endl;
+            return nullptr;
+        }
+        return std::make_shared<MetalSampler>(this, desc, debugName);
     }
 
 } // namespace dmrender
