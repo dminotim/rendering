@@ -93,27 +93,22 @@ namespace dmrender
         /**
          * @brief Creates a GPU image resource.
          *
-         * This is how an offscreen render target is obtained: pass
-         * `ImageUsage::ColorTarget | ImageUsage::Sampled` to get a texture a render pass can
-         * write and a later pass can read back through a sampler.
+         * Covers both roles an image plays here. Pass
+         * `ImageUsage::ColorTarget | ImageUsage::Sampled` for an offscreen render target a later
+         * pass samples, or `ImageUsage::Sampled` plus @p initialData for a texture uploaded from
+         * the CPU.
          *
-         * @param type The dimensionality of the image.
-         * @param format The pixel format.
-         * @param width The width in pixels.
-         * @param height The height in pixels.
-         * @param usage A bitmask of everything the image will be used for. It must be complete:
-         *              both backends bake usage into the native object at creation time and
-         *              neither can widen it afterwards.
-         * @param debugName An optional name for debugging purposes.
+         * @param desc The image's dimensions, format, mip count and usage. The usage must be
+         *             complete: both backends bake it into the native object at creation time
+         *             and neither can widen it afterwards.
+         * @param initialData Optional tightly packed pixels for mip level 0. When supplied on an
+         *                    image with more than one level, the rest of the chain is generated
+         *                    automatically.
          * @return A shared pointer to the created GImage, or nullptr on failure.
          */
         virtual std::shared_ptr<GImage> createImage(
-                ImageType type,
-                ImageFormat format,
-                uint32_t width,
-                uint32_t height,
-                ImageUsage usage,
-                const std::string& debugName = ""
+                const ImageDesc& desc,
+                const void* initialData = nullptr
         ) = 0;
 
         /**
@@ -140,6 +135,14 @@ namespace dmrender
          * @return The current MemoryBudget. Cheap enough to call once per frame.
          */
         virtual MemoryBudget queryMemoryBudget() const = 0;
+
+        /**
+         * @brief The highest sample count this device supports for colour and depth targets.
+         *
+         * Four is universally available on desktop hardware; eight and sixteen are common but
+         * not guaranteed. Query rather than assume, and clamp your preferred setting to this.
+         */
+        virtual SampleCount maxSupportedSampleCount() const = 0;
 
         /**
          * @brief Retrieves the native, backend-specific handle for the logical device.

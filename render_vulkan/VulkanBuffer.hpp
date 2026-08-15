@@ -66,6 +66,7 @@ namespace dmrender {
         MemoryLocation memoryLocation() const override;
 
         void update(const void* data, size_t dataSize, size_t offset = 0) override;
+        void readback(void* destination, size_t destinationSize, size_t offset = 0) override;
 
         void* nativeHandle() const override;
 

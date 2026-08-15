@@ -26,6 +26,8 @@ namespace dmrender {
         void setTexture(
                 uint32_t slot, ShaderStage stage, const std::shared_ptr<GImage>& image,
                 const std::shared_ptr<GSampler>& sampler) override;
+        void setPushConstants(
+                ShaderStage stage, const void* data, size_t size, size_t offset = 0) override;
 
         // --- Команды отрисовки ---
         void draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) override;

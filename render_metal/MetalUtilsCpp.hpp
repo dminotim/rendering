@@ -7,10 +7,25 @@
 #import <Metal/Metal.h>
 #include "GImage.hpp"
 #include "GSampler.hpp"
+#include "PipelineState.hpp"
 #import "Device.hpp"
 
 namespace dmrender {
     MTLPixelFormat ToMTLPixelFormat(ImageFormat format);
+
+    // --- Pipeline state conversions ---
+
+    MTLCompareFunction ToMTLCompareFunction(CompareOp op);
+    MTLStencilOperation ToMTLStencilOperation(StencilOp op);
+    MTLBlendFactor ToMTLBlendFactor(BlendFactor factor);
+    MTLBlendOperation ToMTLBlendOperation(BlendOp op);
+    MTLColorWriteMask ToMTLColorWriteMask(ColorComponent mask);
+    MTLCullMode ToMTLCullMode(CullMode mode);
+    MTLWinding ToMTLWinding(FrontFace face);
+    MTLTriangleFillMode ToMTLTriangleFillMode(PolygonMode mode);
+
+    /// @return An autoreleased MTLStencilDescriptor describing @p state.
+    MTLStencilDescriptor* ToMTLStencilDescriptor(const StencilOpState& state);
 
     /// @brief The MTLTextureUsage flags implied by an abstract ImageUsage bitmask.
     MTLTextureUsage ToMTLTextureUsage(ImageUsage usage);

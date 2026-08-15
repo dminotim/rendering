@@ -141,20 +141,13 @@ namespace dmrender
         return std::make_shared<MetalBuffer>(this, type, usage, size, initialData, debugName);
     }
 
-    std::shared_ptr<GImage> MetalDevice::createImage(
-            ImageType type,
-            ImageFormat format,
-            uint32_t width,
-            uint32_t height,
-            ImageUsage usage,
-            const std::string& debugName
-    ) {
+    std::shared_ptr<GImage> MetalDevice::createImage(const ImageDesc& desc, const void* initialData) {
         assert(m_data->m_device != nullptr && "Cannot create image with a null native device.");
         if (!m_data->m_device) {
             std::cerr << "MetalDevice::createImage Error: Native device is null." << std::endl;
             return nullptr;
         }
-        return std::make_shared<MetalImage>(this, type, format, width, height, usage, debugName);
+        return std::make_shared<MetalImage>(this, desc, initialData);
     }
 
     std::shared_ptr<GSampler> MetalDevice::createSampler(
@@ -192,6 +185,19 @@ namespace dmrender
         return budget;
     }
 
+    SampleCount MetalDevice::maxSupportedSampleCount() const {
+        if (!m_data->m_device) return SampleCount::One;
+
+        // Metal has no limits struct to read; the device is asked about each count directly.
+        for (SampleCount candidate : { SampleCount::Sixteen, SampleCount::Eight,
+                                       SampleCount::Four, SampleCount::Two }) {
+            if ([m_data->m_device supportsTextureSampleCount:static_cast<NSUInteger>(candidate)]) {
+                return candidate;
+            }
+        }
+        return SampleCount::One;
+    }
+
     void MetalDevice::uploadToPrivateBuffer(void* destination,
                                             size_t destinationOffset,
                                             const void* data,
@@ -199,25 +205,7 @@ namespace dmrender
         if (!destination || !data || size == 0) return;
 
         auto mtlDestination = (__bridge id<MTLBuffer>)destination;
-
-        if (!m_data->m_transferQueue) {
-            m_data->m_transferQueue = [m_data->m_device newCommandQueue];
-            m_data->m_transferQueue.label = @"dmrender transfer";
-        }
-
-        if (size > m_data->m_stagingCapacity) {
-            if (m_data->m_stagingBuffer) {
-                [m_data->m_stagingBuffer release];
-                m_data->m_stagingBuffer = nil;
-            }
-            m_data->m_stagingBuffer = [m_data->m_device newBufferWithLength:size
-                                                                    options:MTLResourceStorageModeShared];
-            if (!m_data->m_stagingBuffer) {
-                throw std::runtime_error("MetalDevice: failed to allocate the staging buffer");
-            }
-            m_data->m_stagingBuffer.label = @"dmrender staging";
-            m_data->m_stagingCapacity = size;
-        }
+        ensureTransferResources(size);
 
         memcpy([m_data->m_stagingBuffer contents], data, size);
 
@@ -233,6 +221,128 @@ namespace dmrender
         // Waiting keeps the staging buffer safe to overwrite on the next call and lets the caller
         // treat createBuffer() as "the data is there when this returns".
         [commandBuffer waitUntilCompleted];
+    }
+
+    void MetalDevice::uploadToPrivateTexture(void* destination,
+                                             uint32_t width,
+                                             uint32_t height,
+                                             uint32_t mipLevel,
+                                             const void* data,
+                                             size_t size) const {
+        if (!destination || !data || size == 0) return;
+
+        auto mtlTexture = (__bridge id<MTLTexture>)destination;
+        ensureTransferResources(size);
+
+        memcpy([m_data->m_stagingBuffer contents], data, size);
+
+        const NSUInteger bytesPerRow = size / height;
+
+        id<MTLCommandBuffer> commandBuffer = [m_data->m_transferQueue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        [blit copyFromBuffer:m_data->m_stagingBuffer
+                sourceOffset:0
+           sourceBytesPerRow:bytesPerRow
+         sourceBytesPerImage:size
+                  sourceSize:MTLSizeMake(width, height, 1)
+                   toTexture:mtlTexture
+            destinationSlice:0
+            destinationLevel:mipLevel
+           destinationOrigin:MTLOriginMake(0, 0, 0)];
+        [blit endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+    }
+
+    void MetalDevice::generateMipmapsForTexture(void* texture) const {
+        if (!texture) return;
+
+        auto mtlTexture = (__bridge id<MTLTexture>)texture;
+        if (mtlTexture.mipmapLevelCount <= 1) return;
+
+        ensureTransferResources(0);
+
+        id<MTLCommandBuffer> commandBuffer = [m_data->m_transferQueue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        [blit generateMipmapsForTexture:mtlTexture];
+        [blit endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+    }
+
+    void MetalDevice::readbackFromPrivateTexture(void* source,
+                                                 uint32_t width,
+                                                 uint32_t height,
+                                                 uint32_t mipLevel,
+                                                 void* destination,
+                                                 size_t size) const {
+        if (!source || !destination || size == 0) return;
+
+        auto mtlSource = (__bridge id<MTLTexture>)source;
+        ensureTransferResources(size);
+
+        const NSUInteger bytesPerRow = size / height;
+
+        id<MTLCommandBuffer> commandBuffer = [m_data->m_transferQueue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        [blit copyFromTexture:mtlSource
+                  sourceSlice:0
+                  sourceLevel:mipLevel
+                 sourceOrigin:MTLOriginMake(0, 0, 0)
+                   sourceSize:MTLSizeMake(width, height, 1)
+                     toBuffer:m_data->m_stagingBuffer
+            destinationOffset:0
+       destinationBytesPerRow:bytesPerRow
+     destinationBytesPerImage:size];
+        [blit endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+
+        memcpy(destination, [m_data->m_stagingBuffer contents], size);
+    }
+
+    void MetalDevice::readbackFromPrivateBuffer(void* source,
+                                                size_t sourceOffset,
+                                                void* destination,
+                                                size_t size) const {
+        if (!source || !destination || size == 0) return;
+
+        auto mtlSource = (__bridge id<MTLBuffer>)source;
+        ensureTransferResources(size);
+
+        id<MTLCommandBuffer> commandBuffer = [m_data->m_transferQueue commandBuffer];
+        id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
+        [blit copyFromBuffer:mtlSource
+                sourceOffset:sourceOffset
+                    toBuffer:m_data->m_stagingBuffer
+           destinationOffset:0
+                        size:size];
+        [blit endEncoding];
+        [commandBuffer commit];
+        [commandBuffer waitUntilCompleted];
+
+        memcpy(destination, [m_data->m_stagingBuffer contents], size);
+    }
+
+    void MetalDevice::ensureTransferResources(size_t stagingSize) const {
+        if (!m_data->m_transferQueue) {
+            m_data->m_transferQueue = [m_data->m_device newCommandQueue];
+            m_data->m_transferQueue.label = @"dmrender transfer";
+        }
+
+        if (stagingSize > m_data->m_stagingCapacity) {
+            if (m_data->m_stagingBuffer) {
+                [m_data->m_stagingBuffer release];
+                m_data->m_stagingBuffer = nil;
+            }
+            m_data->m_stagingBuffer = [m_data->m_device newBufferWithLength:stagingSize
+                                                                    options:MTLResourceStorageModeShared];
+            if (!m_data->m_stagingBuffer) {
+                throw std::runtime_error("MetalDevice: failed to allocate the staging buffer");
+            }
+            m_data->m_stagingBuffer.label = @"dmrender staging";
+            m_data->m_stagingCapacity = stagingSize;
+        }
     }
 
 } // namespace dmrender

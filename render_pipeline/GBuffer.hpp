@@ -130,6 +130,21 @@ namespace dmrender {
         virtual void update(const void* data, size_t dataSize, size_t offset = 0) = 0;
 
         /**
+         * @brief Copies buffer contents back into CPU memory.
+         *
+         * Chiefly for reading results the GPU produced — a picking id, a computed bound, a
+         * counter — back to the application.
+         *
+         * @param destination Buffer to fill.
+         * @param destinationSize Number of bytes to read.
+         * @param offset Byte offset within this buffer to read from.
+         *
+         * @note Synchronous: it waits for the GPU to go idle before reading. Like the image
+         *       version, this is a tooling facility rather than a per-frame operation.
+         */
+        virtual void readback(void* destination, size_t destinationSize, size_t offset = 0) = 0;
+
+        /**
          * @brief Retrieves the native, backend-specific handle for the buffer.
          * @return A void pointer to the native object (e.g., id<MTLBuffer>, VkBuffer).
          */

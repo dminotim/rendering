@@ -52,6 +52,54 @@ namespace dmrender
         uint32_t presentImageIndex = 0;
     };
 
+    namespace {
+
+        /// FNV-1a, mixed one 64-bit value at a time.
+        void hashCombine(uint64_t& hash, uint64_t value)
+        {
+            hash ^= value;
+            hash *= 1099511628211ull;
+        }
+
+        constexpr uint64_t kHashSeed = 14695981039346656037ull;
+
+        uint64_t hashBufferBindings(const std::array<BoundBuffer, kMaxBindingSlots>& bindings,
+                                    VkDescriptorSetLayout layout)
+        {
+            // The layout is part of the key because two pipelines with different layouts cannot
+            // share a set even when the same resources are bound.
+            uint64_t hash = kHashSeed;
+            hashCombine(hash, reinterpret_cast<uint64_t>(layout));
+            for (uint32_t slot = 0; slot < kMaxBindingSlots; ++slot) {
+                const BoundBuffer& bound = bindings[slot];
+                if (!bound.buffer) continue;
+                hashCombine(hash, slot);
+                hashCombine(hash, reinterpret_cast<uint64_t>(bound.buffer->buffer()));
+                hashCombine(hash, static_cast<uint64_t>(bound.offset));
+                hashCombine(hash, static_cast<uint64_t>(bound.buffer->size()));
+                hashCombine(hash, static_cast<uint64_t>(bound.descriptorType));
+            }
+            return hash;
+        }
+
+        uint64_t hashTextureBindings(const std::array<BoundTexture, kMaxTextureSlots>& textures,
+                                     VkDescriptorSetLayout layout)
+        {
+            uint64_t hash = kHashSeed;
+            hashCombine(hash, reinterpret_cast<uint64_t>(layout));
+            for (uint32_t slot = 0; slot < kMaxTextureSlots; ++slot) {
+                const BoundTexture& bound = textures[slot];
+                if (!bound.imageView) continue;
+                hashCombine(hash, slot);
+                hashCombine(hash, reinterpret_cast<uint64_t>(bound.imageView));
+                hashCombine(hash, reinterpret_cast<uint64_t>(bound.sampler));
+                hashCombine(hash, static_cast<uint64_t>(bound.layout));
+            }
+            return hash;
+        }
+
+    } // namespace
+
     VulkanCommandBuffer::VulkanCommandBuffer(const std::shared_ptr<CommandQueue>& cmdQueue)
         : m_data(std::make_unique<VulkanCommandBufferData>())
     {
@@ -103,13 +151,17 @@ namespace dmrender
         // Walk every colour attachment once, building the render pass key, the framebuffer's
         // view list and the clear values together. Each attachment contributes its own format,
         // load op and resting layout, so a pass may mix a swapchain image with offscreen targets.
+        // The render pass declares attachments as colours, then resolve targets, then depth, so
+        // the view list and the clear values are gathered in that same order.
         RenderPassKey key{};
         std::vector<VkImageView> attachmentViews;
+        std::vector<VkImageView> resolveViews;
         std::vector<VkClearValue> clearValues;
-        attachmentViews.reserve(colorCount + 1);
-        clearValues.reserve(colorCount + 1);
+        attachmentViews.reserve(colorCount * 2 + 1);
+        clearValues.reserve(colorCount * 2 + 1);
 
         VkExtent2D extent{ 0, 0 };
+        SampleCount sampleCount = SampleCount::One;
 
         for (uint32_t index = 0; index < colorCount; ++index) {
             const auto& color = descriptor->colorAttachment(index);
@@ -121,18 +173,46 @@ namespace dmrender
 
             if (index == 0) {
                 extent = VkExtent2D{ image->width(), image->height() };
+                sampleCount = image->sampleCount();
             } else if (image->width() != extent.width || image->height() != extent.height) {
                 throw std::runtime_error("beginRenderPass: all attachments must have the same size");
+            } else if (image->sampleCount() != sampleCount) {
+                throw std::runtime_error("beginRenderPass: all attachments must have the same sample count");
             }
 
-            key.colors.push_back(RenderPassAttachmentKey{
-                ToVkFormat(image->format()), color.clear, image->restingLayout() });
+            const std::shared_ptr<GImage>& resolve = descriptor->resolveAttachment(index);
+            if (resolve && image->sampleCount() == SampleCount::One) {
+                throw std::runtime_error(
+                    "beginRenderPass: a resolve target was set on a single-sample attachment");
+            }
+
+            RenderPassAttachmentKey colorKey{};
+            colorKey.format = ToVkFormat(image->format());
+            colorKey.clear = color.clear;
+            colorKey.restingLayout = image->restingLayout();
+            if (resolve) {
+                auto* resolveImage = static_cast<VulkanImage*>(resolve.get());
+                colorKey.hasResolve = true;
+                colorKey.resolveRestingLayout = resolveImage->restingLayout();
+                resolveViews.push_back(resolveImage->imageView());
+            }
+            key.colors.push_back(colorKey);
+
             attachmentViews.push_back(image->imageView());
 
             VkClearValue clear{};
             clear.color = { { color.clearValue.color[0], color.clearValue.color[1],
                               color.clearValue.color[2], color.clearValue.color[3] } };
             clearValues.push_back(clear);
+        }
+
+        key.samples = ToVkSampleCount(sampleCount);
+
+        // Resolve targets occupy the attachment slots immediately after the colours, and their
+        // clear values are never used but must still be present to keep the indices aligned.
+        for (VkImageView resolveView : resolveViews) {
+            attachmentViews.push_back(resolveView);
+            clearValues.push_back(VkClearValue{});
         }
 
         const auto& depth = descriptor->depthStencilAttachment();
@@ -258,6 +338,35 @@ namespace dmrender
         };
     }
 
+    void VulkanCommandBuffer::setPushConstants(ShaderStage stage,
+                                               const void* data,
+                                               size_t size,
+                                               size_t offset)
+    {
+        if (!data || size == 0) return;
+        if (!m_data->pipeline) {
+            throw std::runtime_error("setPushConstants: no pipeline is bound");
+        }
+        if (offset + size > kMaxPushConstantBytes) {
+            throw std::runtime_error(
+                "setPushConstants: writes past the guaranteed " +
+                std::to_string(kMaxPushConstantBytes) + " byte push constant block");
+        }
+        if (stage == ShaderStage::Compute) {
+            throw std::runtime_error("setPushConstants: compute stage is not valid inside a render pass");
+        }
+
+        // The pipeline layout declares one range spanning both stages, so the same bytes are
+        // visible to whichever stage the shader reads them from. Passing the stage through would
+        // require matching ranges exactly, and gains nothing at this size.
+        vkCmdPushConstants(m_data->cmdBuffer,
+                           m_data->pipeline->pipelineLayout(),
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           static_cast<uint32_t>(offset),
+                           static_cast<uint32_t>(size),
+                           data);
+    }
+
     void VulkanCommandBuffer::flushDescriptorSet()
     {
         if (!m_data->pipeline) {
@@ -282,6 +391,17 @@ namespace dmrender
             return set;
         };
 
+        // Hash exactly what would be written, so an identical binding state anywhere else in the
+        // frame reuses the set instead of allocating and rewriting one. Draws that only differ
+        // by push constants — the common case once those exist — collapse onto a single set.
+        const uint64_t bufferKey = hashBufferBindings(m_data->bindings,
+                                                      m_data->pipeline->bufferSetLayout());
+        const uint64_t textureKey = hashTextureBindings(m_data->textures,
+                                                        m_data->pipeline->textureSetLayout());
+
+        VkDescriptorSet cachedBufferSet = m_data->queue->findCachedDescriptorSet(bufferKey);
+        VkDescriptorSet cachedTextureSet = m_data->queue->findCachedDescriptorSet(textureKey);
+
         // Both info arrays are sized up front and never grow, so the addresses handed to
         // VkWriteDescriptorSet stay valid until vkUpdateDescriptorSets consumes them.
         std::array<VkDescriptorBufferInfo, kMaxBindingSlots> bufferInfos{};
@@ -290,8 +410,8 @@ namespace dmrender
         writes.reserve(kMaxBindingSlots + kMaxTextureSlots);
 
         // --- set 0: buffers ---
-        VkDescriptorSet bufferSet = VK_NULL_HANDLE;
-        for (uint32_t slot = 0; slot < kMaxBindingSlots; ++slot) {
+        VkDescriptorSet bufferSet = cachedBufferSet;
+        for (uint32_t slot = 0; slot < kMaxBindingSlots && !cachedBufferSet; ++slot) {
             const BoundBuffer& bound = m_data->bindings[slot];
             if (!bound.buffer) continue;
 
@@ -313,8 +433,8 @@ namespace dmrender
         }
 
         // --- set 1: textures ---
-        VkDescriptorSet textureSet = VK_NULL_HANDLE;
-        for (uint32_t slot = 0; slot < kMaxTextureSlots; ++slot) {
+        VkDescriptorSet textureSet = cachedTextureSet;
+        for (uint32_t slot = 0; slot < kMaxTextureSlots && !cachedTextureSet; ++slot) {
             const BoundTexture& bound = m_data->textures[slot];
             if (!bound.imageView) continue;
 
@@ -339,6 +459,13 @@ namespace dmrender
             vkUpdateDescriptorSets(logicalDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
         }
 
+        // Only newly built sets are recorded; a cache hit already has its entry.
+        if (bufferSet && !cachedBufferSet) m_data->queue->cacheDescriptorSet(bufferKey, bufferSet);
+        if (textureSet && !cachedTextureSet) m_data->queue->cacheDescriptorSet(textureKey, textureSet);
+
+        // Binding still happens every draw even on a cache hit: third-party code, the ImGui
+        // backend in particular, binds its own sets between ours. Binding is cheap; allocating
+        // and writing is what the cache removes.
         VkPipelineLayout pipelineLayout = m_data->pipeline->pipelineLayout();
         if (bufferSet) {
             vkCmdBindDescriptorSets(m_data->cmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout,

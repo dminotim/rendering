@@ -1,4 +1,5 @@
 #include "MetalCommandbuffer.hpp"
+#import "MetalPipeline.hpp"
 #import "SwapChain.hpp" // Required for context, even if not directly used.
 #import <QuartzCore/CAMetalLayer.h> // Required for id<CAMetalDrawable>
 #import <Metal/Metal.h>
@@ -83,6 +84,12 @@ namespace dmrender {
         assert(m_data->m_encoder != nil && "No active render pass to set a pipeline on.");
         auto mtlPipeline = (__bridge id<MTLRenderPipelineState>)pipeline->nativeHandle();
         [m_data->m_encoder setRenderPipelineState:mtlPipeline];
+
+        // Metal keeps depth/stencil and rasterisation outside the pipeline state object, so
+        // binding a Pipeline has to apply them separately for the two backends to behave the
+        // same way. See MetalPipeline's class documentation.
+        auto* metalPipeline = static_cast<MetalPipeline*>(pipeline.get());
+        metalPipeline->applyEncoderState((__bridge void*)m_data->m_encoder);
     }
 
     void MetalCommandBuffer::setVertexBuffer(uint32_t slot, const std::shared_ptr<GBuffer>& buffer, size_t offset)
@@ -139,6 +146,41 @@ namespace dmrender {
                 break;
             case ShaderStage::Compute:
                 NSLog(@"[ERROR] Trying to set a texture for Compute stage on a RenderCommandEncoder.");
+                assert(false && "Invalid shader stage for render command encoder");
+                break;
+        }
+    }
+
+    void MetalCommandBuffer::setPushConstants(ShaderStage stage, const void* data, size_t size, size_t offset)
+    {
+        assert(m_data->m_encoder != nil && "No active render pass.");
+        if (!data || size == 0) return;
+        if (offset + size > kMaxPushConstantBytes) {
+            NSLog(@"[ERROR] setPushConstants writes past the guaranteed push constant block");
+            return;
+        }
+
+        // Metal has no push constants. setVertexBytes:/setFragmentBytes: is the equivalent
+        // mechanism: small data copied straight into the command buffer with no backing
+        // MTLBuffer, bound at a reserved slot the uniform range never uses.
+        //
+        // Unlike Vulkan there is no addressable block to write into at an offset, so a partial
+        // write is not expressible; callers pushing a whole struct at offset zero — which is the
+        // normal use — behave identically on both backends.
+        if (offset != 0) {
+            NSLog(@"[ERROR] setPushConstants with a non-zero offset is not supported on Metal");
+            return;
+        }
+
+        switch (stage) {
+            case ShaderStage::Vertex:
+                [m_data->m_encoder setVertexBytes:data length:size atIndex:kPushConstantBufferSlot];
+                break;
+            case ShaderStage::Fragment:
+                [m_data->m_encoder setFragmentBytes:data length:size atIndex:kPushConstantBufferSlot];
+                break;
+            case ShaderStage::Compute:
+                NSLog(@"[ERROR] Trying to set push constants for Compute stage on a RenderCommandEncoder.");
                 assert(false && "Invalid shader stage for render command encoder");
                 break;
         }

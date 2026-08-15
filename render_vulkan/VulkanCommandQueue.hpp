@@ -62,6 +62,25 @@ namespace dmrender
         VkFence currentFence() const;
         VkDescriptorPool currentDescriptorPool() const;
 
+        /**
+         * @brief Looks up a descriptor set built earlier this frame from identical bindings.
+         *
+         * Allocating and writing a descriptor set per draw call is the single largest CPU cost
+         * in this backend. Most draws in a frame rebind the same handful of resources, so the
+         * sets are cached by a hash of exactly what was bound and reused. The cache is cleared
+         * whenever the frame slot's pool is reset, which is what makes reuse safe.
+         *
+         * @param key Hash of the bound state, from VulkanCommandBuffer.
+         * @return The cached set, or VK_NULL_HANDLE if this frame has not built it yet.
+         */
+        VkDescriptorSet findCachedDescriptorSet(uint64_t key) const;
+
+        /// @brief Records a set against @p key for the rest of this frame.
+        void cacheDescriptorSet(uint64_t key, VkDescriptorSet set);
+
+        /// @brief Descriptor sets served from the cache this frame, and total requested.
+        void descriptorCacheStats(uint32_t& hits, uint32_t& requests) const;
+
         VkQueue graphicsQueue() const;
         VkQueue presentQueue() const;
         VkCommandPool commandPool() const;

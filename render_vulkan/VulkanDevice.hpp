@@ -11,6 +11,7 @@
 
 #include "Device.hpp"
 #include "Surface.hpp"
+#include "VulkanMemoryAllocator.hpp"
 
 namespace dmrender {
 
@@ -26,6 +27,10 @@ namespace dmrender {
         bool clear = true;
         /// The layout the attachment rests in outside the pass. See VulkanImage::restingLayout().
         VkImageLayout restingLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        /// Set when this colour attachment is multisampled and resolves into a companion image.
+        bool hasResolve = false;
+        /// Resting layout of the resolve target, meaningful only when hasResolve is set.
+        VkImageLayout resolveRestingLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
         bool operator<(const RenderPassAttachmentKey& other) const;
     };
@@ -52,6 +57,8 @@ namespace dmrender {
         std::vector<RenderPassAttachmentKey> colors;
         /// Format VK_FORMAT_UNDEFINED means the pass has no depth attachment.
         RenderPassAttachmentKey depth;
+        /// Samples per pixel; every attachment in the pass shares this.
+        VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_1_BIT;
 
         bool operator<(const RenderPassKey& other) const;
     };
@@ -78,12 +85,8 @@ namespace dmrender {
         ) override;
 
         std::shared_ptr<GImage> createImage(
-            ImageType type,
-            ImageFormat format,
-            uint32_t width,
-            uint32_t height,
-            ImageUsage usage,
-            const std::string& debugName
+            const ImageDesc& desc,
+            const void* initialData
         ) override;
 
         std::shared_ptr<GSampler> createSampler(
@@ -92,6 +95,8 @@ namespace dmrender {
         ) override;
 
         MemoryBudget queryMemoryBudget() const override;
+
+        SampleCount maxSupportedSampleCount() const override;
 
         void* nativeHandle() const override;
         void* getLogicalDevice() const;
@@ -169,8 +174,89 @@ namespace dmrender {
                                        const void* data,
                                        VkDeviceSize size);
 
+        /// @brief Grows the shared staging buffer so it can hold at least @p size bytes.
+        void ensureStagingCapacity(VkDeviceSize size);
+
+        /**
+         * @brief Uploads tightly packed pixels into one mip level of an image.
+         *
+         * Handles the layout transitions around the copy: the level is moved to
+         * TRANSFER_DST_OPTIMAL, written, then moved to @p finalLayout. Synchronous, like the
+         * buffer upload path.
+         *
+         * @param image The destination image.
+         * @param width Width of this mip level in pixels.
+         * @param height Height of this mip level in pixels.
+         * @param mipLevel Which level to write.
+         * @param data Tightly packed pixels.
+         * @param size Size of @p data in bytes.
+         * @param finalLayout The layout to leave the level in.
+         */
+        void uploadToImage(VkImage image,
+                           uint32_t width,
+                           uint32_t height,
+                           uint32_t mipLevel,
+                           const void* data,
+                           VkDeviceSize size,
+                           VkImageLayout finalLayout);
+
+        /**
+         * @brief Fills levels 1..@p mipLevels-1 by blitting each level down from the one above.
+         *
+         * Every level ends in @p finalLayout. Requires the format to advertise
+         * VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT, which is checked and reported.
+         */
+        void generateMipmaps(VkImage image,
+                             VkFormat format,
+                             uint32_t width,
+                             uint32_t height,
+                             uint32_t mipLevels,
+                             VkImageLayout finalLayout);
+
+        /**
+         * @brief Copies one mip level of an image back into CPU memory.
+         *
+         * The reverse of uploadToImage(): the level is moved to TRANSFER_SRC_OPTIMAL, copied
+         * into the staging buffer, moved back to @p currentLayout, and then read out on the CPU.
+         *
+         * @param image The source image.
+         * @param width Width of this mip level in pixels.
+         * @param height Height of this mip level in pixels.
+         * @param mipLevel Which level to read.
+         * @param destination Buffer to fill with tightly packed pixels.
+         * @param size Number of bytes to read.
+         * @param currentLayout The layout the level is in, and is left in.
+         */
+        void readbackFromImage(VkImage image,
+                               uint32_t width,
+                               uint32_t height,
+                               uint32_t mipLevel,
+                               void* destination,
+                               VkDeviceSize size,
+                               VkImageLayout currentLayout);
+
+        /// @brief Copies a range of a device-local buffer back into CPU memory.
+        void readbackFromBuffer(VkBuffer source,
+                                VkDeviceSize sourceOffset,
+                                void* destination,
+                                VkDeviceSize size);
+
+        /// @brief Begins recording on the shared one-shot transfer command buffer.
+        VkCommandBuffer beginTransferCommands();
+
+        /// @brief Ends, submits and waits for the transfer command buffer.
+        void endTransferCommands();
+
         /// @brief True when VK_EXT_memory_budget was available and enabled.
         bool hasMemoryBudgetExtension() const;
+
+        /**
+         * @brief The device's memory suballocator.
+         *
+         * Every buffer and image allocates through this rather than calling vkAllocateMemory
+         * directly, because drivers cap the number of allocations a process may make.
+         */
+        VulkanMemoryAllocator& allocator() const;
 
         /**
          * @brief Index of the frame slot currently being recorded, in [0, kFramesInFlight).

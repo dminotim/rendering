@@ -41,6 +41,7 @@ namespace dmrender {
         size_t size() const override;
         MemoryLocation memoryLocation() const override;
         void update(const void* data, size_t dataSize, size_t offset) override;
+        void readback(void* destination, size_t destinationSize, size_t offset) override;
         void* nativeHandle() const override;
         const std::string& debugName() const override;
         void setDebugName(const std::string& name) override;

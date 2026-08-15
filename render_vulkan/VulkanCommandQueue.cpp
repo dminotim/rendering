@@ -1,6 +1,7 @@
 #include "VulkanCommandQueue.hpp"
 
 #include <stdexcept>
+#include <unordered_map>
 #include <vector>
 
 #include <render_vulkan/VulkanCommandBuffer.hpp>
@@ -21,6 +22,11 @@ namespace dmrender
 		std::vector<VkDescriptorPool> descriptorPools;
 
 		uint32_t currentFrameSlot = 0;
+
+		/// Cleared every time the frame slot's descriptor pool is reset.
+		std::unordered_map<uint64_t, VkDescriptorSet> descriptorCache;
+		uint32_t descriptorCacheHits = 0;
+		uint32_t descriptorCacheRequests = 0;
 	};
 
 	namespace {
@@ -121,8 +127,34 @@ namespace dmrender
 		VkCheck(vkResetCommandBuffer(m_data->commandBuffers[slot], 0), "vkResetCommandBuffer");
 		VkCheck(vkResetDescriptorPool(logicalDevice, m_data->descriptorPools[slot], 0),
 		        "vkResetDescriptorPool");
+		// Resetting the pool invalidates every set allocated from it, so the cache that points
+		// at them has to go with it.
+		m_data->descriptorCache.clear();
+		m_data->descriptorCacheHits = 0;
+		m_data->descriptorCacheRequests = 0;
 
 		m_data->device->setCurrentFrameSlot(slot);
+	}
+
+	VkDescriptorSet VulkanCommandQueues::findCachedDescriptorSet(uint64_t key) const
+	{
+		++m_data->descriptorCacheRequests;
+		if (auto it = m_data->descriptorCache.find(key); it != m_data->descriptorCache.end()) {
+			++m_data->descriptorCacheHits;
+			return it->second;
+		}
+		return VK_NULL_HANDLE;
+	}
+
+	void VulkanCommandQueues::cacheDescriptorSet(uint64_t key, VkDescriptorSet set)
+	{
+		m_data->descriptorCache.emplace(key, set);
+	}
+
+	void VulkanCommandQueues::descriptorCacheStats(uint32_t& hits, uint32_t& requests) const
+	{
+		hits = m_data->descriptorCacheHits;
+		requests = m_data->descriptorCacheRequests;
 	}
 
 	void VulkanCommandQueues::endFrame()

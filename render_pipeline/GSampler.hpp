@@ -39,9 +39,27 @@ namespace dmrender {
     struct SamplerDesc {
         SamplerFilter minFilter = SamplerFilter::Linear;
         SamplerFilter magFilter = SamplerFilter::Linear;
+
+        /**
+         * @brief How neighbouring mip levels are combined.
+         *
+         * Linear gives trilinear filtering; Nearest snaps to the closest level and can show
+         * visible seams where the level changes.
+         */
+        SamplerFilter mipFilter = SamplerFilter::Linear;
+
         SamplerAddressMode addressU = SamplerAddressMode::ClampToEdge;
         SamplerAddressMode addressV = SamplerAddressMode::ClampToEdge;
         SamplerAddressMode addressW = SamplerAddressMode::ClampToEdge;
+
+        /**
+         * @brief Range of mip levels this sampler may read.
+         *
+         * The default spans every level an image has. Raising minLod forces a blurrier level,
+         * which is occasionally useful for cheap depth-of-field or for hiding aliasing.
+         */
+        float minLod = 0.0f;
+        float maxLod = 1000.0f;
     };
 
     /**

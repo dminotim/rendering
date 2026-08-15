@@ -78,6 +78,25 @@ namespace dmrender {
          */
         bool preciseBudget = false;
 
+        /**
+         * @brief How many native memory allocations the backend currently holds.
+         *
+         * On Vulkan this counts VkDeviceMemory objects, which the driver caps — often at 4096 —
+         * so it is the number that matters when judging whether suballocation is working. It
+         * should stay small and roughly flat as resources come and go.
+         *
+         * Zero when the backend does not manage memory explicitly, as on Metal, where the
+         * driver pools behind MTLBuffer and MTLTexture itself.
+         */
+        uint32_t nativeAllocationCount = 0;
+
+        /**
+         * @brief Bytes those allocations reserve, including space not yet handed out.
+         *
+         * The gap between this and the memory actually in use is the suballocator's headroom.
+         */
+        uint64_t reservedBytes = 0;
+
         /// @brief Bytes still available within the budget, clamped at zero.
         uint64_t availableBytes() const {
             return deviceLocalBudgetBytes > deviceLocalUsedBytes

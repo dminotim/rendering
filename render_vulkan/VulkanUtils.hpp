@@ -15,6 +15,7 @@
 
 #include "GImage.hpp"
 #include "GSampler.hpp"
+#include "PipelineState.hpp"
 
 namespace dmrender {
 
@@ -55,8 +56,23 @@ namespace dmrender {
     /// @brief Descriptor set index holding combined image samplers (`set = 1` in GLSL).
     inline constexpr uint32_t kTextureDescriptorSet = 1;
 
+    /// @brief Converts an abstract sample count to its Vulkan bit.
+    VkSampleCountFlagBits ToVkSampleCount(SampleCount samples);
+
     /// @brief Converts an abstract sampler filter to its Vulkan counterpart.
     VkFilter ToVkFilter(SamplerFilter filter);
+
+    // --- Pipeline state conversions ---
+
+    VkCompareOp ToVkCompareOp(CompareOp op);
+    VkStencilOp ToVkStencilOp(StencilOp op);
+    VkBlendFactor ToVkBlendFactor(BlendFactor factor);
+    VkBlendOp ToVkBlendOp(BlendOp op);
+    VkColorComponentFlags ToVkColorComponents(ColorComponent mask);
+    VkCullModeFlags ToVkCullMode(CullMode mode);
+    VkFrontFace ToVkFrontFace(FrontFace face);
+    VkPolygonMode ToVkPolygonMode(PolygonMode mode);
+    VkStencilOpState ToVkStencilOpState(const StencilOpState& state);
 
     /// @brief Converts an abstract address mode to its Vulkan counterpart.
     VkSamplerAddressMode ToVkAddressMode(SamplerAddressMode mode);

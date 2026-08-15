@@ -54,6 +54,102 @@ namespace dmrender {
                                                   : MTLSamplerMinMagFilterLinear;
     }
 
+    MTLCompareFunction ToMTLCompareFunction(CompareOp op) {
+        switch (op) {
+            case CompareOp::Never:          return MTLCompareFunctionNever;
+            case CompareOp::Less:           return MTLCompareFunctionLess;
+            case CompareOp::Equal:          return MTLCompareFunctionEqual;
+            case CompareOp::LessOrEqual:    return MTLCompareFunctionLessEqual;
+            case CompareOp::Greater:        return MTLCompareFunctionGreater;
+            case CompareOp::NotEqual:       return MTLCompareFunctionNotEqual;
+            case CompareOp::GreaterOrEqual: return MTLCompareFunctionGreaterEqual;
+            case CompareOp::Always:
+            default:                        return MTLCompareFunctionAlways;
+        }
+    }
+
+    MTLStencilOperation ToMTLStencilOperation(StencilOp op) {
+        switch (op) {
+            case StencilOp::Keep:           return MTLStencilOperationKeep;
+            case StencilOp::Zero:           return MTLStencilOperationZero;
+            case StencilOp::Replace:        return MTLStencilOperationReplace;
+            case StencilOp::IncrementClamp: return MTLStencilOperationIncrementClamp;
+            case StencilOp::DecrementClamp: return MTLStencilOperationDecrementClamp;
+            case StencilOp::Invert:         return MTLStencilOperationInvert;
+            case StencilOp::IncrementWrap:  return MTLStencilOperationIncrementWrap;
+            case StencilOp::DecrementWrap:  return MTLStencilOperationDecrementWrap;
+            default:                        return MTLStencilOperationKeep;
+        }
+    }
+
+    MTLBlendFactor ToMTLBlendFactor(BlendFactor factor) {
+        switch (factor) {
+            case BlendFactor::Zero:             return MTLBlendFactorZero;
+            case BlendFactor::One:              return MTLBlendFactorOne;
+            case BlendFactor::SrcColor:         return MTLBlendFactorSourceColor;
+            case BlendFactor::OneMinusSrcColor: return MTLBlendFactorOneMinusSourceColor;
+            case BlendFactor::DstColor:         return MTLBlendFactorDestinationColor;
+            case BlendFactor::OneMinusDstColor: return MTLBlendFactorOneMinusDestinationColor;
+            case BlendFactor::SrcAlpha:         return MTLBlendFactorSourceAlpha;
+            case BlendFactor::OneMinusSrcAlpha: return MTLBlendFactorOneMinusSourceAlpha;
+            case BlendFactor::DstAlpha:         return MTLBlendFactorDestinationAlpha;
+            case BlendFactor::OneMinusDstAlpha: return MTLBlendFactorOneMinusDestinationAlpha;
+            default:                            return MTLBlendFactorOne;
+        }
+    }
+
+    MTLBlendOperation ToMTLBlendOperation(BlendOp op) {
+        switch (op) {
+            case BlendOp::Add:             return MTLBlendOperationAdd;
+            case BlendOp::Subtract:        return MTLBlendOperationSubtract;
+            case BlendOp::ReverseSubtract: return MTLBlendOperationReverseSubtract;
+            case BlendOp::Min:             return MTLBlendOperationMin;
+            case BlendOp::Max:             return MTLBlendOperationMax;
+            default:                       return MTLBlendOperationAdd;
+        }
+    }
+
+    MTLColorWriteMask ToMTLColorWriteMask(ColorComponent mask) {
+        MTLColorWriteMask result = MTLColorWriteMaskNone;
+        if (hasFlag(mask, ColorComponent::R)) result |= MTLColorWriteMaskRed;
+        if (hasFlag(mask, ColorComponent::G)) result |= MTLColorWriteMaskGreen;
+        if (hasFlag(mask, ColorComponent::B)) result |= MTLColorWriteMaskBlue;
+        if (hasFlag(mask, ColorComponent::A)) result |= MTLColorWriteMaskAlpha;
+        return result;
+    }
+
+    MTLCullMode ToMTLCullMode(CullMode mode) {
+        switch (mode) {
+            case CullMode::Front: return MTLCullModeFront;
+            case CullMode::Back:  return MTLCullModeBack;
+            case CullMode::None:
+            default:              return MTLCullModeNone;
+        }
+    }
+
+    MTLWinding ToMTLWinding(FrontFace face) {
+        return (face == FrontFace::Clockwise) ? MTLWindingClockwise
+                                              : MTLWindingCounterClockwise;
+    }
+
+    MTLTriangleFillMode ToMTLTriangleFillMode(PolygonMode mode) {
+        return (mode == PolygonMode::Line) ? MTLTriangleFillModeLines
+                                           : MTLTriangleFillModeFill;
+    }
+
+    MTLStencilDescriptor* ToMTLStencilDescriptor(const StencilOpState& state) {
+        MTLStencilDescriptor* descriptor = [[[MTLStencilDescriptor alloc] init] autorelease];
+        descriptor.stencilFailureOperation = ToMTLStencilOperation(state.failOp);
+        descriptor.depthStencilPassOperation = ToMTLStencilOperation(state.passOp);
+        descriptor.depthFailureOperation = ToMTLStencilOperation(state.depthFailOp);
+        descriptor.stencilCompareFunction = ToMTLCompareFunction(state.compareOp);
+        descriptor.readMask = state.compareMask;
+        descriptor.writeMask = state.writeMask;
+        // The reference value is not part of the descriptor in Metal; MetalPipeline sets it on
+        // the encoder instead.
+        return descriptor;
+    }
+
     MTLSamplerAddressMode ToMTLSamplerAddressMode(SamplerAddressMode mode) {
         switch (mode) {
             case SamplerAddressMode::Repeat:         return MTLSamplerAddressModeRepeat;

@@ -6,11 +6,16 @@
 #define RENDERING_PIPELINE_HPP
 
 #include <initializer_list>
+#include <memory>
+#include <string>
 #include <vector>
 
 #include "GImage.hpp" // For ImageFormat
+#include "PipelineState.hpp"
 
 namespace dmrender {
+
+    class ShaderFunction;
 
     /**
      * @struct RenderTargetFormat
@@ -42,14 +47,23 @@ namespace dmrender {
         ImageFormat stencilFormat = ImageFormat::Undefined;
 
         /**
+         * @brief Samples per pixel, which must match the render pass this pipeline runs in.
+         *
+         * A pipeline built for four samples cannot be used in a single-sample pass or the other
+         * way round, so switching MSAA on and off at runtime means keeping both pipelines.
+         */
+        SampleCount sampleCount = SampleCount::One;
+
+        /**
          * @brief Convenience builder for the common single render target case.
          * @param color The colour attachment format.
          * @param depth An optional depth attachment format.
          */
         static RenderTargetFormat singleTarget(ImageFormat color,
-                                               ImageFormat depth = ImageFormat::Undefined)
+                                               ImageFormat depth = ImageFormat::Undefined,
+                                               SampleCount samples = SampleCount::One)
         {
-            return RenderTargetFormat{ {color}, depth, ImageFormat::Undefined };
+            return RenderTargetFormat{ {color}, depth, ImageFormat::Undefined, samples };
         }
 
         /**
@@ -58,10 +72,47 @@ namespace dmrender {
          * @param depth An optional depth attachment format.
          */
         static RenderTargetFormat multiTarget(std::initializer_list<ImageFormat> colors,
-                                              ImageFormat depth = ImageFormat::Undefined)
+                                              ImageFormat depth = ImageFormat::Undefined,
+                                              SampleCount samples = SampleCount::One)
         {
-            return RenderTargetFormat{ std::vector<ImageFormat>(colors), depth, ImageFormat::Undefined };
+            return RenderTargetFormat{ std::vector<ImageFormat>(colors), depth,
+                                       ImageFormat::Undefined, samples };
         }
+    };
+
+    /**
+     * @struct PipelineDesc
+     * @brief Everything that goes into a graphics pipeline state object.
+     *
+     * Fixed-function state is described here rather than hardcoded, so a pipeline can render
+     * opaque geometry, composite a transparent overlay, or write a shadow map with a depth bias,
+     * all through the same call.
+     *
+     * @note Which backend object each field ends up in differs a great deal. Vulkan bakes the
+     *       lot into one immutable VkPipeline. Metal splits it: blending and formats belong to
+     *       the MTLRenderPipelineState, depth and stencil become a separate MTLDepthStencilState,
+     *       and culling, winding, fill mode and depth bias are commands on the encoder. The
+     *       backend reassembles them so that binding one Pipeline applies all of it either way.
+     */
+    struct PipelineDesc {
+        std::shared_ptr<ShaderFunction> vertexFunction;
+        std::shared_ptr<ShaderFunction> fragmentFunction;
+
+        /// @brief Formats of the attachments this pipeline writes.
+        RenderTargetFormat targetFormat;
+
+        /**
+         * @brief Blending, one entry per colour attachment.
+         *
+         * When empty, every attachment gets the default opaque BlendState. When non-empty it
+         * must have exactly as many entries as targetFormat.colorFormats.
+         */
+        std::vector<BlendState> blendStates;
+
+        DepthStencilState depthStencil{};
+        RasterizerState rasterizer{};
+
+        std::string debugName;
     };
 
     /**

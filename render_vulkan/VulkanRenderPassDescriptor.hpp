@@ -47,6 +47,11 @@ namespace dmrender {
 
         uint32_t colorAttachmentCount() const override;
 
+        void setResolveAttachment(uint32_t index, const std::shared_ptr<GImage>& resolveImage) override;
+
+        /// @brief The resolve target for colour attachment @p index, or nullptr if none is set.
+        const std::shared_ptr<GImage>& resolveAttachment(uint32_t index) const;
+
         void setDepthStencilAttachment(const std::shared_ptr<GImage>& image,
                                        bool clearDepth,
                                        float depthValue,
