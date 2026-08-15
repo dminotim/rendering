@@ -18,23 +18,36 @@ namespace dmrender {
 
     /**
      * @class VulkanBuffer
-     * @brief GBuffer backed by a host visible, permanently mapped VkBuffer.
+     * @brief GBuffer whose memory placement follows its BufferUsage hint.
      *
-     * Metal's shared-storage MTLBuffer can simply be written through its `contents` pointer.
-     * The closest Vulkan equivalent is HOST_VISIBLE|HOST_COHERENT memory kept mapped for the
-     * lifetime of the buffer, which is what this class does — no staging copies, no explicit
-     * flushes, `update()` is a memcpy just like on Metal.
+     * @par Where the memory goes
+     * - **Static** asks for DEVICE_LOCAL memory (VRAM). On a discrete GPU that memory is not
+     *   CPU-addressable, so the initial contents and any later `update()` travel through the
+     *   device's staging buffer and a `vkCmdCopyBuffer`.
+     * - **Dynamic** and **Stream** ask for HOST_VISIBLE|HOST_COHERENT memory kept mapped for the
+     *   buffer's lifetime, matching Metal's shared-storage MTLBuffer: `update()` is a memcpy.
+     *
+     * Two things can change that outcome, and `memoryLocation()` reports what actually happened.
+     * If the device-local budget cannot fit the allocation, a Static buffer falls back to
+     * host-visible memory instead of failing. And if the chosen device-local type turns out to be
+     * host-visible too — integrated GPUs, or discrete ones with resizable BAR — the buffer is
+     * mapped directly and the staging copy is skipped even though it lives in VRAM.
      *
      * @par Dynamic buffers
      * A BufferUsage::Dynamic buffer is allocated as @c kFramesInFlight consecutive, properly
      * aligned regions inside one VkBuffer. `update()` always writes the region belonging to the
      * frame slot currently being recorded, and the command buffer binds that same region. Without
      * this a per-frame uniform update would overwrite memory that a still-executing frame is
-     * reading. Metal hides the same hazard behind its own buffer pooling.
+     * reading.
      *
-     * @note Because a dynamic update targets one region only, a *partial* update
-     *       (`dataSize < size()`) leaves the other regions holding older data. Callers that
-     *       rewrite the whole struct every frame — the normal uniform pattern — are unaffected.
+     * @par Partial updates
+     * Regions make a partial write (`offset > 0` or `dataSize < size()`) subtler than it looks:
+     * the bytes the caller did *not* write would otherwise still hold whatever that region
+     * contained a frame ago, not the current contents. So a partial write first copies the whole
+     * of the most recently written region into this one, then applies the new bytes on top,
+     * leaving every region a complete snapshot. The copy is skipped when the write covers the
+     * whole buffer, and when the region is already the newest — so the common case of rewriting
+     * a whole uniform struct each frame costs nothing extra.
      */
     class VulkanBuffer : public GBuffer {
     public:
@@ -50,6 +63,7 @@ namespace dmrender {
         BufferType type() const override;
         BufferUsage usage() const override;
         size_t size() const override;
+        MemoryLocation memoryLocation() const override;
 
         void update(const void* data, size_t dataSize, size_t offset = 0) override;
 
@@ -68,6 +82,14 @@ namespace dmrender {
         VkDeviceSize currentRegionOffset() const;
 
     private:
+        /**
+         * @brief Writes into one specific region rather than the current frame's.
+         *
+         * Used by the constructor to seed every region of a dynamic buffer, and by the public
+         * update() once it has resolved which region the current frame owns.
+         */
+        void update(const void* data, size_t dataSize, size_t offset, uint32_t region);
+
         std::unique_ptr<VulkanBufferNativeData> m_data;
     };
 

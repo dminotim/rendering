@@ -1,5 +1,6 @@
 #import <Metal/Metal.h>
 #include "MetalBuffer.hpp"
+#include "MetalDevice.hpp"
 #include "Device.hpp"
 
 #include <stdexcept>
@@ -19,6 +20,9 @@ namespace dmrender {
         size_t m_size = 0;
         std::string m_debugName;
         bool m_isManaged = false; // Flag to track if the buffer uses MTLResourceStorageModeManaged.
+        bool m_isPrivate = false; // GPU-only storage: no `contents`, writes go through a blit.
+        MemoryLocation m_location = MemoryLocation::HostVisible;
+        const MetalDevice* m_device = nullptr;
     };
 
 // --- Constructor & Destructor ---
@@ -44,37 +48,51 @@ namespace dmrender {
         }
         auto mtlDeviceHandle = (id<MTLDevice>) device->nativeHandle();
 
+        m_data->m_device = static_cast<const MetalDevice*>(device);
+
         // --- Determine the optimal Metal resource storage options based on usage hint ---
         MTLResourceOptions options;
         switch (usage) {
             case BufferUsage::Static:
-                // For static data (write once, read many), 'Managed' storage is a good default.
-                // It requires manual synchronization via 'didModifyRange' after CPU writes.
-                options = MTLResourceStorageModeManaged;
-                m_data->m_isManaged = true;
+                // Write once, read many: worth the staging copy. 'Private' is GPU-only memory —
+                // the direct equivalent of Vulkan's DEVICE_LOCAL — so the CPU cannot touch it and
+                // the initial contents arrive via a blit from a shared staging buffer.
+                options = MTLResourceStorageModePrivate;
+                m_data->m_isPrivate = true;
+                m_data->m_location = MemoryLocation::DeviceLocal;
                 break;
             case BufferUsage::Dynamic:
-                // For frequently updated data, 'Shared' storage is simpler as it avoids manual sync,
-                // but may have a performance cost. Both CPU and GPU access the same memory.
+                // Rewritten by the CPU every frame, so a staging copy per update would cost more
+                // than the slower GPU reads. 'Shared' memory is visible to both.
                 options = MTLResourceStorageModeShared;
-                m_data->m_isManaged = false;
+                m_data->m_location = MemoryLocation::HostVisible;
                 break;
             case BufferUsage::Stream:
-                // Treat 'Stream' usage (write once, read once) as 'Dynamic' for simplicity.
+                // Written once and read once: no reuse to amortise a staging copy over.
                 options = MTLResourceStorageModeShared;
-                m_data->m_isManaged = false;
+                m_data->m_location = MemoryLocation::HostVisible;
                 break;
         }
-        // TODO: For optimal performance with 'Static' usage, implement a path using a temporary
-        // staging buffer to upload data to a 'Private' buffer, which is GPU-only.
+
+        // The capacity check, matching the Vulkan path: if the allocation would not fit in what
+        // the device says is still available, fall back to shared memory rather than failing.
+        if (m_data->m_isPrivate) {
+            const MemoryBudget budget = device->queryMemoryBudget();
+            if (budget.preciseBudget && budget.availableBytes() < size) {
+                options = MTLResourceStorageModeShared;
+                m_data->m_isPrivate = false;
+                m_data->m_location = MemoryLocation::HostVisible;
+            }
+        }
 
         // --- Allocate the native MTLBuffer ---
         id<MTLBuffer> newBuffer = nil;
-        if (initialData) {
-            // Create a buffer and initialize it with the provided data.
+        if (initialData && !m_data->m_isPrivate) {
+            // Shared storage can be initialised in place.
             newBuffer = [mtlDeviceHandle newBufferWithBytes:initialData length:size options:options];
         } else {
-            // Create a buffer without initializing its contents.
+            // Private storage has no CPU-visible contents, so it is allocated empty and filled
+            // through the blit path below.
             newBuffer = [mtlDeviceHandle newBufferWithLength:size options:options];
         }
 
@@ -91,6 +109,10 @@ namespace dmrender {
         // In MRR, this means we are responsible for releasing it later.
         // The 'newBuffer' has a retain count of +1 from the 'new...' methods.
         m_data->m_mtlBuffer = newBuffer;
+
+        if (initialData && m_data->m_isPrivate) {
+            m_data->m_device->uploadToPrivateBuffer((__bridge void*)newBuffer, 0, initialData, size);
+        }
     }
 
     MetalBuffer::~MetalBuffer() {
@@ -126,6 +148,15 @@ namespace dmrender {
             return;
         }
 
+        if (m_data->m_isPrivate) {
+            // Private storage is inaccessible from the CPU, so the bytes travel through a staging
+            // buffer and a blit. This blocks until the copy completes, which is why the interface
+            // documents update() as slow and points frequently-updated data at BufferUsage::Dynamic.
+            m_data->m_device->uploadToPrivateBuffer((__bridge void*)m_data->m_mtlBuffer,
+                                                    offset, data, dataSize);
+            return;
+        }
+
         void* bufferPointer = [m_data->m_mtlBuffer contents];
         if (bufferPointer) {
             // Copy the data from the CPU pointer to the buffer's memory.
@@ -138,11 +169,12 @@ namespace dmrender {
                 [m_data->m_mtlBuffer didModifyRange:NSMakeRange(offset, dataSize)];
             }
         } else {
-            // This case occurs if the buffer storage is 'Private', which is inaccessible from the CPU.
-            // Updating such a buffer would require a different mechanism (e.g., a command to copy
-            // from a staging buffer).
-            NSLog(@"[WARNING] MetalBuffer::update failed: buffer contents are nil. This is expected for private-storage buffers.");
+            NSLog(@"[ERROR] MetalBuffer::update failed: buffer contents are nil.");
         }
+    }
+
+    MemoryLocation MetalBuffer::memoryLocation() const {
+        return m_data->m_location;
     }
 
     void* MetalBuffer::nativeHandle() const {

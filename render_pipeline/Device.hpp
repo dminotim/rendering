@@ -11,6 +11,7 @@
 #include "GBuffer.hpp"
 #include "GImage.hpp"
 #include "GSampler.hpp"
+#include "Memory.hpp"
 
 namespace dmrender
 {
@@ -127,6 +128,18 @@ namespace dmrender
                 const SamplerDesc& desc,
                 const std::string& debugName = ""
         ) = 0;
+
+        /**
+         * @brief Takes a snapshot of device-local memory availability.
+         *
+         * Resource creation already consults this internally — a static buffer that would not
+         * fit in the remaining budget is placed in host-visible memory instead of failing — so
+         * calling it is only necessary when the application wants to size its own allocations,
+         * report usage, or degrade quality before the budget runs out.
+         *
+         * @return The current MemoryBudget. Cheap enough to call once per frame.
+         */
+        virtual MemoryBudget queryMemoryBudget() const = 0;
 
         /**
          * @brief Retrieves the native, backend-specific handle for the logical device.

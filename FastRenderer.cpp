@@ -43,6 +43,14 @@ namespace dmrender
     /// written by the plane pass survives the round trip through the composite pass untouched.
     constexpr ImageFormat kTargetFormat = ImageFormat::BGRA8_UNORM;
 
+    const char* toString(MemoryLocation location) {
+        return location == MemoryLocation::DeviceLocal ? "VRAM" : "host";
+    }
+
+    double toMiB(uint64_t bytes) {
+        return static_cast<double>(bytes) / (1024.0 * 1024.0);
+    }
+
     void FramebufferSizeCallback(GLFWwindow* window, int width, int height) {
         auto* ctx = static_cast<std::shared_ptr<SwapChain>*>(glfwGetWindowUserPointer(window));
         if (*(ctx)) {
@@ -184,6 +192,20 @@ namespace dmrender
                     viewScale = 1.0f;
                     viewPan[0] = viewPan[1] = 0.0f;
                 }
+                ImGui::Separator();
+                const MemoryBudget budget = device->queryMemoryBudget();
+                ImGui::Text("VRAM %.0f / %.0f MiB used%s",
+                            toMiB(budget.deviceLocalUsedBytes),
+                            toMiB(budget.deviceLocalBudgetBytes),
+                            budget.preciseBudget ? "" : " (estimated)");
+                if (budget.unifiedMemory) {
+                    ImGui::TextUnformatted("Unified memory: staging copies are same-pool");
+                }
+                ImGui::Text("vertices %s | indices %s | uniforms %s",
+                            toString(vertexBuffer->memoryLocation()),
+                            toString(indexBuffer->memoryLocation()),
+                            toString(uniformBuffer->memoryLocation()));
+
                 ImGui::Separator();
                 ImGui::Checkbox("Multiple render targets", &useMultipleTargets);
                 if (useMultipleTargets) {

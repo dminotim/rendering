@@ -1,6 +1,7 @@
 ﻿#include "VulkanDevice.hpp"
 #include <vulkan/vulkan.h>
 #include <algorithm>
+#include <cstring>
 #include <map>
 #include <utility>
 #include <stdexcept>
@@ -21,6 +22,20 @@ namespace dmrender {
         uint32_t graphicsFamilyIndex = 0;
         uint32_t presentFamilyIndex = 0;
         VkPhysicalDeviceProperties properties{};
+        VkPhysicalDeviceMemoryProperties memoryProperties{};
+        bool memoryBudgetExtension = false;
+
+        // --- Transfer context: everything needed to push data into device-local memory ---
+        VkQueue transferQueue = VK_NULL_HANDLE;   ///< Same queue the graphics work uses.
+        VkCommandPool transferPool = VK_NULL_HANDLE;
+        VkCommandBuffer transferCmd = VK_NULL_HANDLE;
+        VkFence transferFence = VK_NULL_HANDLE;
+        /// Reused across uploads and grown on demand, so repeated uploads do not re-allocate.
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        void* stagingMapped = nullptr;
+        VkDeviceSize stagingCapacity = 0;
+
         /// @brief Render passes are immutable and cheap to share, so they are cached forever.
         std::map<RenderPassKey, VkRenderPass> renderPasses;
         /// @brief Framebuffers, keyed by the render pass and the exact set of views they wrap.
@@ -60,6 +75,32 @@ namespace dmrender {
     const std::vector<const char*> deviceExtensions = {
         VK_KHR_SWAPCHAIN_EXTENSION_NAME
     };
+
+    /// Extensions the backend uses when present but works without.
+    const std::vector<const char*> optionalDeviceExtensions = {
+        // Turns queryMemoryBudget() from "heap sizes only" into real per-process usage figures.
+        VK_EXT_MEMORY_BUDGET_EXTENSION_NAME
+    };
+
+    /// @brief Names of the optional extensions @p p_device actually supports.
+    std::vector<const char*> findSupportedOptionalExtensions(VkPhysicalDevice p_device)
+    {
+        uint32_t extensionCount = 0;
+        vkEnumerateDeviceExtensionProperties(p_device, nullptr, &extensionCount, nullptr);
+        std::vector<VkExtensionProperties> available(extensionCount);
+        vkEnumerateDeviceExtensionProperties(p_device, nullptr, &extensionCount, available.data());
+
+        std::vector<const char*> supported;
+        for (const char* wanted : optionalDeviceExtensions) {
+            for (const auto& extension : available) {
+                if (std::strcmp(wanted, extension.extensionName) == 0) {
+                    supported.push_back(wanted);
+                    break;
+                }
+            }
+        }
+        return supported;
+    }
 
     struct SwapChainSupportDetails {
         VkSurfaceCapabilitiesKHR capabilities;
@@ -205,6 +246,14 @@ namespace dmrender {
             return;
 
         vkDeviceWaitIdle(m_data->device);
+
+        if (m_data->stagingMapped) vkUnmapMemory(m_data->device, m_data->stagingMemory);
+        if (m_data->stagingBuffer) vkDestroyBuffer(m_data->device, m_data->stagingBuffer, nullptr);
+        if (m_data->stagingMemory) vkFreeMemory(m_data->device, m_data->stagingMemory, nullptr);
+        if (m_data->transferFence) vkDestroyFence(m_data->device, m_data->transferFence, nullptr);
+        // Destroying the pool frees the transfer command buffer allocated from it.
+        if (m_data->transferPool) vkDestroyCommandPool(m_data->device, m_data->transferPool, nullptr);
+
         for (auto& [key, framebuffer] : m_data->framebuffers) {
             vkDestroyFramebuffer(m_data->device, framebuffer, nullptr);
         }
@@ -445,6 +494,180 @@ namespace dmrender {
         return std::make_shared<VulkanSampler>(this, desc, debugName);
     }
 
+    bool VulkanDevice::hasMemoryBudgetExtension() const
+    {
+        return m_data->memoryBudgetExtension;
+    }
+
+    MemoryBudget VulkanDevice::queryMemoryBudget() const
+    {
+        MemoryBudget budget{};
+        budget.preciseBudget = m_data->memoryBudgetExtension;
+
+        // VK_EXT_memory_budget chains onto the standard memory properties query and fills in per
+        // heap budget/usage figures that account for other processes. Without it the only honest
+        // answer is the heap size.
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budgetProperties{};
+        budgetProperties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT;
+
+        VkPhysicalDeviceMemoryProperties2 properties{};
+        properties.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_PROPERTIES_2;
+        if (m_data->memoryBudgetExtension) {
+            properties.pNext = &budgetProperties;
+        }
+        vkGetPhysicalDeviceMemoryProperties2(m_data->physicalDevice, &properties);
+
+        const VkPhysicalDeviceMemoryProperties& memory = properties.memoryProperties;
+
+        // Sum every device-local heap. Discrete GPUs normally have exactly one; integrated ones
+        // report their shared system memory as device-local, which is what unifiedMemory means.
+        bool sawHostVisibleDeviceLocal = false;
+        for (uint32_t heapIndex = 0; heapIndex < memory.memoryHeapCount; ++heapIndex) {
+            if ((memory.memoryHeaps[heapIndex].flags & VK_MEMORY_HEAP_DEVICE_LOCAL_BIT) == 0) {
+                continue;
+            }
+
+            budget.deviceLocalTotalBytes += memory.memoryHeaps[heapIndex].size;
+            if (m_data->memoryBudgetExtension) {
+                budget.deviceLocalBudgetBytes += budgetProperties.heapBudget[heapIndex];
+                budget.deviceLocalUsedBytes += budgetProperties.heapUsage[heapIndex];
+            } else {
+                // No usage figure is available, so report the heap as entirely free rather than
+                // inventing a number. preciseBudget tells the caller not to trust it.
+                budget.deviceLocalBudgetBytes += memory.memoryHeaps[heapIndex].size;
+            }
+        }
+
+        for (uint32_t typeIndex = 0; typeIndex < memory.memoryTypeCount; ++typeIndex) {
+            const VkMemoryPropertyFlags flags = memory.memoryTypes[typeIndex].propertyFlags;
+            if ((flags & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) &&
+                (flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) {
+                sawHostVisibleDeviceLocal = true;
+                break;
+            }
+        }
+        // A device whose device-local memory is directly CPU-writable either shares one physical
+        // pool with the host or exposes all of VRAM over the bus (resizable BAR). Either way a
+        // staging copy is avoidable, which is exactly what VulkanBuffer checks for.
+        budget.unifiedMemory = sawHostVisibleDeviceLocal &&
+                               m_data->properties.deviceType != VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+
+        return budget;
+    }
+
+    uint32_t VulkanDevice::selectMemoryType(uint32_t typeBits,
+                                            VkMemoryPropertyFlags preferred,
+                                            VkMemoryPropertyFlags required,
+                                            VkMemoryPropertyFlags& outFlags) const
+    {
+        const VkPhysicalDeviceMemoryProperties& memory = m_data->memoryProperties;
+
+        for (VkMemoryPropertyFlags wanted : { preferred, required }) {
+            for (uint32_t i = 0; i < memory.memoryTypeCount; ++i) {
+                const bool typeAllowed = (typeBits & (1u << i)) != 0;
+                const VkMemoryPropertyFlags flags = memory.memoryTypes[i].propertyFlags;
+                if (typeAllowed && (flags & wanted) == wanted) {
+                    outFlags = flags;
+                    return i;
+                }
+            }
+        }
+        throw std::runtime_error("selectMemoryType: no memory type satisfies the requested properties");
+    }
+
+    void VulkanDevice::uploadToDeviceLocalBuffer(VkBuffer destination,
+                                                 VkDeviceSize destinationOffset,
+                                                 const void* data,
+                                                 VkDeviceSize size)
+    {
+        if (!data || size == 0) return;
+
+        // Grow the shared staging buffer if this upload does not fit. Uploads are rare and their
+        // sizes cluster, so one buffer that reaches a high-water mark beats allocating per call.
+        if (size > m_data->stagingCapacity) {
+            if (m_data->stagingMapped) {
+                vkUnmapMemory(m_data->device, m_data->stagingMemory);
+                m_data->stagingMapped = nullptr;
+            }
+            if (m_data->stagingBuffer) vkDestroyBuffer(m_data->device, m_data->stagingBuffer, nullptr);
+            if (m_data->stagingMemory) vkFreeMemory(m_data->device, m_data->stagingMemory, nullptr);
+            m_data->stagingBuffer = VK_NULL_HANDLE;
+            m_data->stagingMemory = VK_NULL_HANDLE;
+
+            VkBufferCreateInfo bufferInfo{};
+            bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+            bufferInfo.size = size;
+            bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+            bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+            VkCheck(vkCreateBuffer(m_data->device, &bufferInfo, nullptr, &m_data->stagingBuffer),
+                    "vkCreateBuffer (staging)");
+
+            VkMemoryRequirements requirements{};
+            vkGetBufferMemoryRequirements(m_data->device, m_data->stagingBuffer, &requirements);
+
+            VkMemoryPropertyFlags chosenFlags = 0;
+            VkMemoryAllocateInfo allocInfo{};
+            allocInfo.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+            allocInfo.allocationSize = requirements.size;
+            allocInfo.memoryTypeIndex = selectMemoryType(
+                requirements.memoryTypeBits,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
+                chosenFlags);
+            VkCheck(vkAllocateMemory(m_data->device, &allocInfo, nullptr, &m_data->stagingMemory),
+                    "vkAllocateMemory (staging)");
+            VkCheck(vkBindBufferMemory(m_data->device, m_data->stagingBuffer, m_data->stagingMemory, 0),
+                    "vkBindBufferMemory (staging)");
+            VkCheck(vkMapMemory(m_data->device, m_data->stagingMemory, 0, VK_WHOLE_SIZE, 0, &m_data->stagingMapped),
+                    "vkMapMemory (staging)");
+
+            m_data->stagingCapacity = requirements.size;
+        }
+
+        std::memcpy(m_data->stagingMapped, data, static_cast<size_t>(size));
+
+        VkCheck(vkResetCommandBuffer(m_data->transferCmd, 0), "vkResetCommandBuffer (transfer)");
+
+        VkCommandBufferBeginInfo beginInfo{};
+        beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        VkCheck(vkBeginCommandBuffer(m_data->transferCmd, &beginInfo), "vkBeginCommandBuffer (transfer)");
+
+        VkBufferCopy region{};
+        region.srcOffset = 0;
+        region.dstOffset = destinationOffset;
+        region.size = size;
+        vkCmdCopyBuffer(m_data->transferCmd, m_data->stagingBuffer, destination, 1, &region);
+
+        // Make the copy visible to every stage that might read the buffer afterwards. A single
+        // barrier here is cheaper than reasoning about which one this particular buffer needs.
+        VkMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        barrier.dstAccessMask = VK_ACCESS_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_INDEX_READ_BIT |
+                                VK_ACCESS_UNIFORM_READ_BIT | VK_ACCESS_SHADER_READ_BIT;
+        vkCmdPipelineBarrier(m_data->transferCmd,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | VK_PIPELINE_STAGE_VERTEX_SHADER_BIT |
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                             0, 1, &barrier, 0, nullptr, 0, nullptr);
+
+        VkCheck(vkEndCommandBuffer(m_data->transferCmd), "vkEndCommandBuffer (transfer)");
+
+        VkSubmitInfo submitInfo{};
+        submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        submitInfo.commandBufferCount = 1;
+        submitInfo.pCommandBuffers = &m_data->transferCmd;
+
+        VkCheck(vkResetFences(m_data->device, 1, &m_data->transferFence), "vkResetFences (transfer)");
+        VkCheck(vkQueueSubmit(m_data->transferQueue, 1, &submitInfo, m_data->transferFence),
+                "vkQueueSubmit (transfer)");
+        // Waiting keeps the staging buffer safe to overwrite on the next call and lets the caller
+        // treat createBuffer() as "the data is there when this returns".
+        VkCheck(vkWaitForFences(m_data->device, 1, &m_data->transferFence, VK_TRUE, UINT64_MAX),
+                "vkWaitForFences (transfer)");
+    }
+
     uint32_t VulkanDevice::getGraphicsFamilyIndex() const
     {
         return m_data->graphicsFamilyIndex;
@@ -480,14 +703,23 @@ namespace dmrender {
             queueCreateInfos.push_back(queueCreateInfo);
         }
 
+        // Required extensions plus whichever optional ones this GPU happens to offer.
+        std::vector<const char*> enabledExtensions = deviceExtensions;
+        for (const char* extension : findSupportedOptionalExtensions(m_data->physicalDevice)) {
+            enabledExtensions.push_back(extension);
+            if (std::strcmp(extension, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0) {
+                m_data->memoryBudgetExtension = true;
+            }
+        }
+
         VkPhysicalDeviceFeatures deviceFeatures{};
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());
         createInfo.pQueueCreateInfos = queueCreateInfos.data();
         createInfo.pEnabledFeatures = &deviceFeatures;
-        createInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
-        createInfo.ppEnabledExtensionNames = deviceExtensions.data();
+        createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExtensions.size());
+        createInfo.ppEnabledExtensionNames = enabledExtensions.data();
 
         if (ENABLE_VALIDATION_LAYER) {
             createInfo.enabledLayerCount = static_cast<uint32_t>(validationLayers.size());
@@ -500,6 +732,34 @@ namespace dmrender {
         }
         m_activatedInstanceExtensions.insert(DeviceExtension::Surface);
         m_activatedInstanceExtensions.insert(DeviceExtension::SwapChain);
+
+        vkGetPhysicalDeviceMemoryProperties(m_data->physicalDevice, &m_data->memoryProperties);
+
+        // Transfer context. The queue handle is the same object VulkanCommandQueues will fetch —
+        // vkGetDeviceQueue returns the identical queue for the same family and index — so uploads
+        // are ordered against rendering work rather than racing it. Single-threaded use only.
+        vkGetDeviceQueue(m_data->device, m_data->graphicsFamilyIndex, 0, &m_data->transferQueue);
+
+        VkCommandPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        poolInfo.queueFamilyIndex = m_data->graphicsFamilyIndex;
+        poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT |
+                         VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        VkCheck(vkCreateCommandPool(m_data->device, &poolInfo, nullptr, &m_data->transferPool),
+                "vkCreateCommandPool (transfer)");
+
+        VkCommandBufferAllocateInfo allocInfo{};
+        allocInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocInfo.commandPool = m_data->transferPool;
+        allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocInfo.commandBufferCount = 1;
+        VkCheck(vkAllocateCommandBuffers(m_data->device, &allocInfo, &m_data->transferCmd),
+                "vkAllocateCommandBuffers (transfer)");
+
+        VkFenceCreateInfo fenceInfo{};
+        fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        VkCheck(vkCreateFence(m_data->device, &fenceInfo, nullptr, &m_data->transferFence),
+                "vkCreateFence (transfer)");
    /*     vkGetDeviceQueue(device, graphicsFamilyIndex, 0, &graphicsQueue);
         vkGetDeviceQueue(device, presentFamilyIndex, 0, &presentQueue);*/
     }

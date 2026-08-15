@@ -60,10 +60,15 @@ namespace dmrender
         m_data->queueRef = cmdQueue;
         m_data->queue = static_cast<VulkanCommandQueues*>(cmdQueue.get());
         m_data->device = static_cast<VulkanDevice*>(cmdQueue->getDevice().get());
+        // Open the frame slot before touching its command buffer. acquireNextImage() normally got
+        // here first, and this call is then a no-op — waiting on an already signalled fence
+        // returns immediately and resetting a command buffer in the initial state is legal. It
+        // matters for the case where there is no acquire at all: a command buffer that renders
+        // only into offscreen targets and is never presented still needs its slot recycled.
+        m_data->queue->beginFrame();
         m_data->cmdBuffer = m_data->queue->currentCommandBuffer();
 
-        // The queue already reset this buffer in beginFrame(); open recording right away so the
-        // object behaves like a freshly created MTLCommandBuffer.
+        // Open recording right away so the object behaves like a freshly created MTLCommandBuffer.
         VkCommandBufferBeginInfo beginInfo{};
         beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -395,6 +400,12 @@ namespace dmrender
     {
         if (!image) return;
         auto* vulkanImage = static_cast<VulkanImage*>(image.get());
+        if (!vulkanImage->swapChain()) {
+            // An offscreen texture is a perfectly good render target but it has nothing to
+            // present to. Silently ignoring this would show an unchanged window and look like a
+            // rendering bug rather than the API misuse it is.
+            throw std::runtime_error("present: image did not come from a swapchain");
+        }
         m_data->presentSwapChain = vulkanImage->swapChain();
         m_data->presentImageIndex = vulkanImage->imageIndex();
     }

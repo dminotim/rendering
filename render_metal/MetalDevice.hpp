@@ -47,6 +47,26 @@ public:
             const std::string& debugName
     ) override;
 
+    MemoryBudget queryMemoryBudget() const override;
+
+    /**
+     * @brief Copies CPU data into a private-storage MTLBuffer through a staging buffer.
+     *
+     * MTLStorageModePrivate memory has no `contents` pointer, so the bytes are written into a
+     * shared-storage staging buffer and copied on the GPU with a blit encoder. The command
+     * buffer is waited on before returning, making this synchronous — appropriate at resource
+     * creation time and deliberately unattractive per frame.
+     *
+     * @param destination The private MTLBuffer to write into, as an id<MTLBuffer>.
+     * @param destinationOffset Byte offset within @p destination.
+     * @param data The bytes to upload.
+     * @param size How many bytes to upload.
+     */
+    void uploadToPrivateBuffer(void* destination,
+                               size_t destinationOffset,
+                               const void* data,
+                               size_t size) const;
+
     void* nativeHandle() const override;
 
     MetalDevice(DeviceId id, void* nativeDevice);
