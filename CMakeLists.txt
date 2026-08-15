@@ -17,10 +17,20 @@ set(CMAKE_CXX_EXTENSIONS OFF) # Good practice to disable compiler-specific exten
 # We check if a custom path is provided, otherwise use a default relative path.
 if(NOT DEFINED SHADER_DIR)
     if(APPLE)
+        # Metal compiles its shaders at runtime, so the sources are used in place.
         set(SHADER_DIR "${CMAKE_SOURCE_DIR}/shaders/metal")
     elseif(WIN32)
-        set(SHADER_DIR "${CMAKE_SOURCE_DIR}/shaders/glsl")
+        # Vulkan consumes pre-compiled SPIR-V, so SHADER_DIR points at the build output
+        # rather than at the GLSL sources in shaders/glsl.
+        set(SHADER_DIR "${CMAKE_BINARY_DIR}/shaders")
     endif()
+endif()
+option(ENABLE_VULKAN_DEBUG "Enable feature FOO" OFF)
+
+if(ENABLE_VULKAN_DEBUG)
+    add_compile_definitions(ENABLE_VALIDATION_LAYER=1)
+else()
+    add_compile_definitions(ENABLE_VALIDATION_LAYER=0)
 endif()
 # Add the definition to all targets in the project.
 add_compile_definitions(SHADER_DIR="${SHADER_DIR}")
@@ -58,20 +68,14 @@ if(APPLE)
     )
 elseif(WIN32)
     message(STATUS "Configuring for Windows")
+     file(GLOB_RECURSE VULKAN_IMPL_SRC
+            "${CMAKE_SOURCE_DIR}/render_vulkan/*.hpp"
+            "${CMAKE_SOURCE_DIR}/render_vulkan/*.cpp"
+    )
+    list(APPEND PLATFORM_SRC ${VULKAN_IMPL_SRC})
     list(APPEND PLATFORM_SRC
             external/imgui/backends/imgui_impl_vulkan.cpp
     )
-    # Example for a future DirectX 12 backend
-    # file(GLOB_RECURSE DX12_IMPL_SRC
-    #     "${CMAKE_SOURCE_DIR}/render_dx12/*.hpp"
-    #     "${CMAKE_SOURCE_DIR}/render_dx12/*.cpp"
-    # )
-    # list(APPEND PLATFORM_SRC ${DX12_IMPL_SRC})
-    #
-    # # ImGui backend for DirectX 12
-    # list(APPEND PLATFORM_SRC
-    #     external/imgui/backends/imgui_impl_dx12.cpp
-    # )
 else()
     message(FATAL_ERROR "Unsupported platform! Only Apple and Windows are configured.")
 endif()
@@ -80,7 +84,7 @@ endif()
 # --- Main Application Target ---
 set(APP_NAME "RenderingApp")
 
-add_executable(${APP_NAME}
+set(ALL_SOURCE_FILES
         # Core application files
         main.cpp
         FastRenderer.hpp
@@ -99,6 +103,71 @@ add_executable(${APP_NAME}
         # Platform-specific implementation
         ${PLATFORM_SRC}
 )
+
+add_executable(${APP_NAME} ${ALL_SOURCE_FILES})
+
+# --- Shader Compilation (Vulkan only) ---
+# Metal compiles PlaneShader.metal at runtime and picks the entry point by name. Vulkan has no
+# runtime GLSL compiler, so each entry point is compiled to its own SPIR-V module here. The file
+# names encode the same logical function names the Metal code uses:
+#
+#   plane_vertex_shader   -> ${SHADER_DIR}/PlaneShader.plane_vertex_shader.spv
+#   plane_fragment_shader -> ${SHADER_DIR}/PlaneShader.plane_fragment_shader.spv
+#
+# which is exactly what VulkanShaderFunction looks for, so application code can keep passing an
+# extensionless path plus a function name on both platforms.
+if(WIN32)
+    find_program(GLSLC_EXECUTABLE
+            NAMES glslc glslc.exe
+            HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin"
+            DOC "glslc shader compiler shipped with the Vulkan SDK"
+    )
+    if(NOT GLSLC_EXECUTABLE)
+        message(FATAL_ERROR "glslc was not found. Install the Vulkan SDK or set VULKAN_SDK.")
+    endif()
+    message(STATUS "Using shader compiler: ${GLSLC_EXECUTABLE}")
+
+    # source file -> logical function name the shader is exposed as
+    set(GLSL_SHADERS
+            "PlaneShader.vert:plane_vertex_shader"
+            "PlaneShader.frag:plane_fragment_shader"
+    )
+
+    set(SPIRV_OUTPUTS "")
+    foreach(_shader_entry ${GLSL_SHADERS})
+        string(REPLACE ":" ";" _parts "${_shader_entry}")
+        list(GET _parts 0 _shader_file)
+        list(GET _parts 1 _function_name)
+
+        get_filename_component(_shader_stem "${_shader_file}" NAME_WE)
+        set(_shader_src "${CMAKE_SOURCE_DIR}/shaders/glsl/${_shader_file}")
+        set(_spirv_out "${SHADER_DIR}/${_shader_stem}.${_function_name}.spv")
+
+        add_custom_command(
+                OUTPUT "${_spirv_out}"
+                COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_DIR}"
+                COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2 -o "${_spirv_out}" "${_shader_src}"
+                DEPENDS "${_shader_src}"
+                COMMENT "Compiling ${_shader_file} -> ${_shader_stem}.${_function_name}.spv"
+                VERBATIM
+        )
+        list(APPEND SPIRV_OUTPUTS "${_spirv_out}")
+    endforeach()
+
+    add_custom_target(Shaders DEPENDS ${SPIRV_OUTPUTS})
+    add_dependencies(${APP_NAME} Shaders)
+
+    # Keep the GLSL sources visible in the IDE next to the rest of the project.
+    target_sources(${APP_NAME} PRIVATE
+            shaders/glsl/PlaneShader.vert
+            shaders/glsl/PlaneShader.frag
+    )
+    set_source_files_properties(
+            shaders/glsl/PlaneShader.vert
+            shaders/glsl/PlaneShader.frag
+            PROPERTIES HEADER_FILE_ONLY TRUE
+    )
+endif()
 
 # --- Target Configuration: Include Directories ---
 target_include_directories(${APP_NAME} PRIVATE
@@ -126,8 +195,23 @@ if(APPLE)
             "-framework Foundation" # Often needed for Objective-C objects
     )
 elseif(WIN32)
+    target_include_directories(${APP_NAME} PRIVATE render_vulkan)
     target_link_libraries(${APP_NAME} PRIVATE
             glfw
             Vulkan::Vulkan
     )
+if(MSVC)
+    foreach(_source ${ALL_SOURCE_FILES})
+	    if (IS_ABSOLUTE "${_source}")
+		    file(RELATIVE_PATH _source_rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_source}")
+	    else()
+		    set(_source_rel "${_source}")
+	    endif()
+	    get_filename_component(_source_path "${_source_rel}" PATH)
+	    string(REPLACE "/" "\\" _source_path_msvc "${_source_path}")
+	    source_group("${_source_path_msvc}" FILES "${_source}")
+    endforeach()
+    target_compile_options(${APP_NAME} PRIVATE /bigobj /WX /W0)
+endif(MSVC)
+
 endif()

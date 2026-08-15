@@ -7,6 +7,7 @@
 #ifndef RENDERING_COMMANDLISTS_HPP
 #define RENDERING_COMMANDLISTS_HPP
 #include <memory>
+#include <Commandbuffer.hpp>
 
 namespace dmrender
 {
@@ -20,7 +21,7 @@ namespace dmrender
      * A CommandQueue is responsible for submitting command buffers to the GPU for execution.
      * It is created from a Device and represents a specific queue family (e.g., graphics, compute).
      */
-    class CommandQueue
+    class CommandQueue : public std::enable_shared_from_this<CommandQueue>
     {
     public:
         /**
@@ -52,6 +53,18 @@ namespace dmrender
         std::shared_ptr<Device> getDevice() const {
             return m_device;
         }
+
+        /**
+         * @brief Creates a command buffer that records into this queue.
+         *
+         * @return A ready-to-record CommandBuffer. On Metal this is a brand new
+         *         MTLCommandBuffer; on Vulkan it is a view onto the pre-allocated
+         *         VkCommandBuffer belonging to the frame slot currently being recorded.
+         *
+         * @note The queue must be owned by a std::shared_ptr (all helper factories do this),
+         *       because the returned command buffer keeps the queue alive.
+         */
+        virtual std::shared_ptr<CommandBuffer> getCommandBuffer() = 0;
 
     protected:
         /// @brief A shared pointer to the parent logical device.

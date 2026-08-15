@@ -79,6 +79,7 @@ namespace dmrender
 
         if (m_data->m_device) {
             m_activatedInstanceExtensions.insert(DeviceExtension::Surface);
+            m_activatedInstanceExtensions.insert(DeviceExtension::SwapChain);
         }
     }
 
@@ -92,17 +93,7 @@ namespace dmrender
 // --- Public API Implementation ---
 
     bool MetalDevice::activateExtension(DeviceExtension ext) {
-        switch (ext) {
-            case DeviceExtension::Surface:
-                if (m_data->m_device) {
-                    m_activatedInstanceExtensions.insert(ext);
-                    return true;
-                }
-                return false;
-            default:
-                // Unknown or unsupported extension.
-                return false;
-        }
+         return m_activatedInstanceExtensions.contains(ext);
     }
 
     bool MetalDevice::isExtensionAvailable(DeviceExtension ext) const {

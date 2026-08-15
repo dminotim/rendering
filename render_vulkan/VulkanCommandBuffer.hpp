@@ -1,0 +1,77 @@
+//
+// Created by Artem Avdoshkin on 12.07.2025.
+//
+#ifndef RENDERING_VULKANCOMMANDBUFFER_HPP
+#define RENDERING_VULKANCOMMANDBUFFER_HPP
+
+#include <vulkan/vulkan.h>
+
+#include <memory>
+
+#include "Commandbuffer.hpp"
+#include "CommandQueue.hpp"
+
+namespace dmrender {
+
+    struct VulkanCommandBufferData;
+
+    /**
+     * @class VulkanCommandBuffer
+     * @brief Records one frame into the VkCommandBuffer owned by the current frame slot.
+     *
+     * Unlike MetalCommandBuffer this object does not own its native handle — the queue does, and
+     * recycles it every @c kFramesInFlight frames. Constructing this class opens recording;
+     * `commit()` closes it, submits it and presents, then hands the slot back to the queue.
+     *
+     * @par Deferred binding
+     * `setVertexBuffer()` and `setUniformBuffer()` only remember what was bound. The actual
+     * descriptor set is allocated, written and bound lazily on the next draw call, because Vulkan
+     * needs the pipeline's descriptor set layout — which is only known once a pipeline is set —
+     * and because a set can then cover every slot in one `vkUpdateDescriptorSets`.
+     */
+    class VulkanCommandBuffer : public CommandBuffer {
+    public:
+        explicit VulkanCommandBuffer(const std::shared_ptr<CommandQueue>& cmdQueue);
+        ~VulkanCommandBuffer() override;
+
+        void beginRenderPass(std::shared_ptr<RenderPassDescriptor> pass) override;
+        void setRenderPipeline(std::shared_ptr<Pipeline> pipeline) override;
+        void setVertexBuffer(
+            uint32_t slot, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
+        void setUniformBuffer(
+            uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
+
+        void draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) override;
+        void drawIndexed(const std::shared_ptr<GBuffer>& indexBuffer,
+            IndexType indexType,
+            uint32_t indexCount,
+            uint32_t instanceCount,
+            uint32_t firstIndexOffsetBytes,
+            int32_t vertexOffset,
+            uint32_t firstInstance) override;
+
+        void endRenderPass() override;
+
+        void present(const std::shared_ptr<GImage>& image) override;
+        void commit() override;
+
+        /// @return The VkCommandBuffer handle itself (not a pointer to it), as ImGui expects.
+        void* nativeHandle() override;
+
+        /**
+         * @brief Vulkan has no separate encoder object.
+         * @return The same VkCommandBuffer as nativeHandle() while a render pass is active,
+         *         nullptr otherwise, so the contract "valid only inside a render pass" holds.
+         */
+        void* nativeEncoder() override;
+
+    private:
+        /// Allocates, writes and binds the descriptor set for whatever is currently bound.
+        void flushDescriptorSet();
+
+        std::unique_ptr<VulkanCommandBufferData> m_data;
+    };
+
+} // namespace dmrender
+
+#endif

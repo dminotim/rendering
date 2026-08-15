@@ -23,6 +23,7 @@ namespace dmrender
     {
         Surface,    // Support for rendering to a window surface.
         SwapChain,  // Support for swapchain creation (often implied by Surface).
+        Validation, // validation layer (awailable in vulkan only)
         // Add other extensions as needed, e.g., RayTracing, MeshShaders, etc.
     };
 

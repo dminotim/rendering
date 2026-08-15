@@ -51,7 +51,6 @@ namespace dmrender
         IMGUI_CHECKVERSION();
         ImGui::CreateContext();
         ImGui_ImplGlfw_InitForOther(window, true);
-        helper::initImgui(device); // Инициализация ImGui через хелпер
 
         std::shared_ptr<CommandQueue> cmdLists = helper::createCommandQueue(device);
 
@@ -62,11 +61,14 @@ namespace dmrender
         glfwSetWindowUserPointer(window, &swapChain);
         glfwSetFramebufferSizeCallback(window, FramebufferSizeCallback);
 
-        const std::filesystem::path shaderPath = std::filesystem::path(SHADER_DIR) / "PlaneShader.metal";
+        helper::initImgui(swapChain); // после свопчейна: Vulkan-бэкенду нужны его render pass и image count
+
+        // Без расширения: каждый бэкенд достраивает своё (.metal исходник либо .spv артефакт).
+        const std::filesystem::path shaderPath = std::filesystem::path(SHADER_DIR) / "PlaneShader";
         std::shared_ptr<ShaderFunction> planeVertexFunction = helper::createShaderFunction(device, shaderPath,
-                                                                                           "plane_vertex_shader");
+            "plane_vertex_shader");
         std::shared_ptr<ShaderFunction> planeFragmentFunction = helper::createShaderFunction(device, shaderPath,
-                                                                                             "plane_fragment_shader");
+            "plane_fragment_shader");
 
         RenderTargetFormat targetFormatForPipeline{};
         targetFormatForPipeline.colorFormat = surface->getFormat();
@@ -79,14 +81,14 @@ namespace dmrender
         const uint16_t quadIndices[] = { 0, 1, 2, 0, 2, 3 };
 
         std::shared_ptr<GBuffer> vertexBuffer = device->createBuffer(
-                BufferType::Vertex, BufferUsage::Static, sizeof(quadVertices), quadVertices, "GridVertexBuffer");
+            BufferType::Vertex, BufferUsage::Static, sizeof(quadVertices), quadVertices, "GridVertexBuffer");
         std::shared_ptr<GBuffer> indexBuffer = device->createBuffer(
-                BufferType::Index, BufferUsage::Static, sizeof(quadIndices), quadIndices, "GridIndexBuffer");
+            BufferType::Index, BufferUsage::Static, sizeof(quadIndices), quadIndices, "GridIndexBuffer");
         std::shared_ptr<GBuffer> uniformBuffer = device->createBuffer(
-                BufferType::Uniform, BufferUsage::Dynamic, sizeof(Uniforms), nullptr, "GridUniformBuffer");
+            BufferType::Uniform, BufferUsage::Dynamic, sizeof(Uniforms), nullptr, "GridUniformBuffer");
 
         float viewScale = 1.0f;
-        float viewPan[2] = {0.0f, 0.0f};
+        float viewPan[2] = { 0.0f, 0.0f };
 
         while (!glfwWindowShouldClose(window))
         {
@@ -96,24 +98,9 @@ namespace dmrender
             if (!nextImgToDraw) { continue; }
 
             std::shared_ptr<RenderPassDescriptor> renderPass = helper::createRenderPassDescriptor();
-            ClearValue clearColor = {0.98f, 0.98f, 0.96f, 1.0f};
+            ClearValue clearColor = { 0.98f, 0.98f, 0.96f, 1.0f };
             renderPass->setColorAttachment(0, nextImgToDraw, true, clearColor);
 
-            std::shared_ptr<CommandBuffer> buffer = helper::createCommandBuffer(cmdLists);
-
-            glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
-            Uniforms uniforms = {{(float)fbWidth, (float)fbHeight}, viewScale, {viewPan[0], viewPan[1]}};
-            uniformBuffer->update(&uniforms, sizeof(Uniforms));
-
-            buffer->beginRenderPass(renderPass);
-            {
-                buffer->setRenderPipeline(pipeline);
-                buffer->setVertexBuffer(0, vertexBuffer);
-                buffer->setUniformBuffer(1, ShaderStage::Vertex, uniformBuffer);
-                buffer->setUniformBuffer(1, ShaderStage::Fragment, uniformBuffer);
-                buffer->drawIndexed(indexBuffer, IndexType::UInt16, sizeof(quadIndices) / sizeof(uint16_t), 1, 0, 0, 0);
-            }
-            // Используем ImGui хелперы
             helper::newFrameImgui(renderPass);
             ImGui_ImplGlfw_NewFrame();
             ImGui::NewFrame();
@@ -129,6 +116,25 @@ namespace dmrender
                 ImGui::End();
             }
             ImGui::Render();
+
+
+
+            std::shared_ptr<CommandBuffer> buffer = helper::createCommandBuffer(cmdLists);
+
+            glfwGetFramebufferSize(window, &fbWidth, &fbHeight);
+            Uniforms uniforms = { {(float)fbWidth, (float)fbHeight}, viewScale, {viewPan[0], viewPan[1]} };
+            uniformBuffer->update(&uniforms, sizeof(Uniforms));
+
+            buffer->beginRenderPass(renderPass);
+            {
+                buffer->setRenderPipeline(pipeline);
+                buffer->setVertexBuffer(0, vertexBuffer);
+                buffer->setUniformBuffer(1, ShaderStage::Vertex, uniformBuffer);
+                buffer->setUniformBuffer(1, ShaderStage::Fragment, uniformBuffer);
+                buffer->drawIndexed(indexBuffer, IndexType::UInt16, sizeof(quadIndices) / sizeof(uint16_t), 1, 0, 0, 0);
+            }
+            // Используем ImGui хелперы
+
             helper::renderInternalImgui(buffer);
 
             buffer->endRenderPass();

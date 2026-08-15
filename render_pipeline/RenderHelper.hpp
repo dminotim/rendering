@@ -69,10 +69,13 @@ namespace dmrender
 
         /**
          * @brief Initializes the ImGui backend.
-         * @param device The graphics device.
+         * @param swapChain The swapchain ImGui will draw into.
          * @return True on success, false otherwise.
+         * @note Must be called after the swapchain exists: the Vulkan backend needs its image
+         *       count and a compatible render pass to build ImGui's own pipeline, while the
+         *       Metal backend only reads the device off it.
          */
-        bool initImgui(const std::shared_ptr<Device>& device);
+        bool initImgui(const std::shared_ptr<SwapChain>& swapChain);
 
         /**
          * @brief Starts a new ImGui frame within the given render pass.
