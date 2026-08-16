@@ -1,0 +1,647 @@
+# Часть VIII. Тени
+
+> **Цель главы.** Добавить тени от направленного, прожекторного и точечного источников. Разобрать,
+> почему у теней всегда два дефекта одновременно и почему избавление от одного усиливает другой.
+> И построить всё это в обход двух ограничений обёртки, которые в этой главе проявляются в полную
+> силу.
+
+---
+
+## 8.1. Идея и два ограничения
+
+Тень — это ответ на вопрос: видна ли точка поверхности из источника света? Прямой способ ответить
+— посмотреть на сцену **глазами источника** и запомнить, до какой поверхности свет долетает
+первой. Потом, освещая точку, сравнить: если запомненное расстояние меньше, чем до нашей точки,
+значит что-то заслоняет, и точка в тени.
+
+Классическая реализация: рендерим сцену из источника **только в буфер глубины**, затем в проходе
+освещения сэмплируем этот буфер с аппаратным сравнением. Оба шага в нашей обёртке недоступны.
+
+**Ограничение 1: буфер глубины нельзя сэмплировать.** Как разбиралось в главе 7, изображение с
+назначением `DepthStencil` отдыхает в состоянии вложения глубины. Привязка его через
+`setTexture()` — ошибка слоя валидации на Vulkan.
+
+**Ограничение 2: нет сэмплера сравнения.** В `SamplerDesc` нет поля `compareOp`. Аппаратный
+сравнивающий сэмплер (`sampler2DShadow` в GLSL, `compare_func` в Metal) не только сравнивает, но и
+делает это **до** фильтрации: билинейная выборка возвращает долю прошедших сравнение из четырёх
+текселей, то есть даёт бесплатное сглаживание края тени. У нас этого нет.
+
+Обход обоих ограничений один и тот же:
+
+> **Пишем расстояние до источника в цветовую цель `R32_FLOAT` и сравниваем вручную в шейдере.**
+
+Что мы теряем: бесплатное сглаживание аппаратного сравнения (компенсируем ручным PCF) и 4 байта
+на тексель вместо возможных 2 (`D16_UNORM` мы всё равно не могли бы читать).
+
+Что выигрываем: полный контроль над тем, что хранится. Хранить можно **линейное расстояние в
+мировых единицах**, а не нелинейную глубину, и это делает подбор смещения (раздел 8.4) намного
+понятнее — смещение измеряется в сантиметрах, а не в безразмерных единицах буфера.
+
+---
+
+## 8.2. Карта теней направленного света
+
+У солнца лучи параллельны, поэтому «камера источника» ортографическая.
+
+### Ресурсы
+
+```cpp
+constexpr uint32_t    kShadowResolution = 2048;
+constexpr ImageFormat kShadowFormat     = ImageFormat::R32_FLOAT;
+
+// Цель, в которую пишем расстояние. Sampled — чтобы прочитать в проходе освещения.
+ImageDesc shadowDesc{};
+shadowDesc.format = kShadowFormat;
+shadowDesc.width  = kShadowResolution;
+shadowDesc.height = kShadowResolution;
+shadowDesc.usage  = ImageUsage::ColorTarget | ImageUsage::Sampled;
+shadowDesc.debugName = "ShadowDistance";
+std::shared_ptr<GImage> shadowMap = device->createImage(shadowDesc);
+
+// Вложение глубины нужно для теста «кто ближе». Само оно никогда не читается.
+ImageDesc shadowDepthDesc{};
+shadowDepthDesc.format = ImageFormat::D32_FLOAT;
+shadowDepthDesc.width  = kShadowResolution;
+shadowDepthDesc.height = kShadowResolution;
+shadowDepthDesc.usage  = ImageUsage::DepthStencil;
+shadowDepthDesc.debugName = "ShadowDepth";
+std::shared_ptr<GImage> shadowDepth = device->createImage(shadowDepthDesc);
+```
+
+Память: 2048² × 4 Б = **16.8 МБ** на карту, плюс столько же на глубину. Для четырёх каскадов —
+134 МБ. Тени — второй по прожорливости потребитель видеопамяти после текстур, и разрешение стоит
+выбирать осознанно, а не «побольше».
+
+### Ортографическая проекция
+
+```cpp
+Mat4 orthographic(float left, float right, float bottom, float top,
+                  float nearZ, float farZ)
+{
+    Mat4 m{};
+    m[0]  =  2.0f / (right - left);
+    m[5]  =  2.0f / (top - bottom);
+    m[10] = -1.0f / (farZ - nearZ);          // диапазон глубины [0, 1]
+    m[12] = -(right + left) / (right - left);
+    m[13] = -(top + bottom) / (top - bottom);
+    m[14] = -nearZ / (farZ - nearZ);
+    m[15] =  1.0f;
+    return m;
+}
+```
+
+В проходе теней **reverse-Z не нужен**: ортографическая проекция даёт линейное распределение
+глубины, компенсировать нечего. Пайплайн тени использует обычный `CompareOp::Less` и очистку
+единицей. Это нормально — состояние глубины принадлежит пайплайну, и разные проходы кадра могут
+иметь разное.
+
+### Объём, накрывающий сцену
+
+Ортографический объём надо расположить так, чтобы он накрывал ту часть сцены, которая видна
+камере. Простейший вариант — накрыть сцену целиком:
+
+```cpp
+Mat4 directionalLightMatrix(const Vec3& lightDirection,
+                            const Vec3& sceneCenter, float sceneRadius)
+{
+    // Отодвигаем «камеру источника» за пределы сцены вдоль луча.
+    const Vec3 eye = sceneCenter - lightDirection * (sceneRadius * 2.0f);
+
+    // Осторожно: если направление света почти вертикально, вектор «вверх»
+    // окажется коллинеарен, и матрица вырождается.
+    const Vec3 up = std::abs(lightDirection.y) > 0.99f ? Vec3{0, 0, 1} : Vec3{0, 1, 0};
+
+    const Mat4 view = lookAt(eye, sceneCenter, up);
+    const Mat4 projection = orthographic(-sceneRadius, sceneRadius,
+                                         -sceneRadius, sceneRadius,
+                                          0.0f, sceneRadius * 4.0f);
+    return multiply(projection, view);
+}
+```
+
+Для Sponza это даёт объём порядка 30 метров на 2048 текселей — примерно 1.5 см на тексель.
+Приемлемо. Для San Miguel, где сцена в сотню метров, тот же расчёт даёт 5 см на тексель, и тени
+становятся заметно ступенчатыми. Отсюда каскады (раздел 8.6).
+
+### Проход теней
+
+```cpp
+std::shared_ptr<RenderPassDescriptor> shadowPass = helper::createRenderPassDescriptor();
+
+ClearValue farClear{};
+farClear.color[0] = 1e30f;      // «бесконечно далеко»: там, где нет геометрии, тени нет
+farClear.depth    = 1.0f;
+
+shadowPass->setColorAttachment(0, shadowMap, true, farClear);
+shadowPass->setDepthStencilAttachment(shadowDepth, true, 1.0f, false, 0);
+
+// Параметры источника — один раз на проход.
+ShadowPassUniforms passUniforms{};
+std::copy(lightMatrix.begin(), lightMatrix.end(), passUniforms.lightViewProjection);
+passUniforms.farDistance  = sceneRadius * 4.0f;
+passUniforms.isPointLight = 0.0f;
+shadowUniformBuffer->update(&passUniforms, sizeof(passUniforms));
+
+cmd->beginRenderPass(shadowPass);
+cmd->setRenderPipeline(shadowPipeline);
+cmd->setVertexBuffer(0, vertexBuffer);
+cmd->setUniformBuffer(1, ShaderStage::Vertex,   shadowUniformBuffer);
+cmd->setUniformBuffer(1, ShaderStage::Fragment, shadowUniformBuffer);
+
+for (const MeshSubset& subset : subsetsInLightFrustum) {
+    ShadowDrawConstants draw{};
+    std::copy(modelMatrix.begin(), modelMatrix.end(), draw.model);
+    cmd->setPushConstants(ShaderStage::Vertex, &draw, sizeof(draw));
+    cmd->drawIndexed(indexBuffer, IndexType::UInt32, subset.indexCount, 1,
+                     subset.firstIndex * sizeof(uint32_t), 0, 0);
+}
+cmd->endRenderPass();
+```
+
+**Очистка большим значением обязательна.** Там, где геометрии нет, расстояние должно быть таким,
+чтобы сравнение всегда решало «не в тени». Очистка нулём даёт полностью затенённую сцену — и это
+самая частая ошибка при первом запуске.
+
+### Шейдер теневого прохода
+
+Обратите внимание на распределение данных между uniform-буфером и push-константами. Матрица
+источника одна на весь проход, поэтому ей место в uniform-буфере; матрица модели меняется от
+вызова к вызову, поэтому она в push-константах. Если положить обе в push-константы, получится
+128 байт **только на матрицы**, и на остальное места не останется — гарантированный лимит будет
+исчерпан.
+
+```metal
+// Одно на проход → uniform-буфер, слот 1.
+struct ShadowPassUniforms {
+    float4x4 lightViewProjection;
+    packed_float3 lightPosition;  float farDistance;
+    float    isPointLight;        float _pad[3];
+};
+
+// На вызов → push-константы, 64 байта из 128.
+struct ShadowDrawConstants {
+    float4x4 model;
+};
+
+struct ShadowVertexOut {
+    float4 clipPosition [[position]];
+    float3 worldPosition;
+};
+
+vertex ShadowVertexOut shadow_vertex(const device MeshVertex*     vertices [[buffer(0)]],
+                                     constant ShadowPassUniforms& pass     [[buffer(1)]],
+                                     constant ShadowDrawConstants& draw    [[buffer(8)]],
+                                     uint                         vid      [[vertex_id]])
+{
+    MeshVertex v = vertices[vid];
+    const float4 world = draw.model * float4(float3(v.position), 1.0);
+
+    ShadowVertexOut out;
+    out.clipPosition  = pass.lightViewProjection * world;
+    out.worldPosition = world.xyz;
+    return out;
+}
+
+fragment float shadow_fragment(ShadowVertexOut              in   [[stage_in]],
+                               constant ShadowPassUniforms& pass [[buffer(1)]])
+{
+    if (pass.isPointLight > 0.5) {
+        // Точечный источник: радиальное расстояние в мировых единицах.
+        return length(in.worldPosition - float3(pass.lightPosition));
+    }
+    // Направленный: clipPosition.z уже нормирован ортографической проекцией
+    // в [0, 1]. Умножаем на протяжённость объёма, чтобы получить мировые единицы —
+    // тогда и смещение в разделе 8.4 задаётся в сантиметрах, а не в долях буфера.
+    return in.clipPosition.z * pass.farDistance;
+}
+```
+
+Для материалов с альфа-маской нужен **отдельный вариант теневого шейдера** с `discard`. Иначе
+листва Sponza отбросит тень сплошным прямоугольником вместо силуэта листьев — дефект, который
+сразу выдаёт качество реализации.
+
+---
+
+## 8.3. Выборка тени в проходе освещения
+
+```metal
+struct ShadowUniforms {
+    float4x4 lightViewProjection;
+    float    texelWorldSize;      // мировой размер одного текселя карты
+    float    constantBias;        // в мировых единицах
+    float    normalBias;          // в текселях
+    float    farDistance;         // протяжённость объёма источника, мировые единицы
+};
+
+// Возвращает 1 — освещено, 0 — в тени.
+float sampleShadow(texture2d<float> shadowMap,
+                   sampler          shadowSampler,
+                   constant ShadowUniforms& shadow,
+                   float3 worldPosition, float3 normal, float3 lightDirection)
+{
+    // Сдвигаем точку выборки вдоль нормали. Это лечит теневое акне
+    // геометрически, а не подбором константы — см. 8.4.
+    const float3 offsetPosition =
+        worldPosition + normal * (shadow.normalBias * shadow.texelWorldSize);
+
+    const float4 lightClip = shadow.lightViewProjection * float4(offsetPosition, 1.0);
+
+    // Для ортографической проекции w == 1, но деление оставляем:
+    // тот же код обслуживает и прожектор с перспективной проекцией.
+    const float3 ndc = lightClip.xyz / lightClip.w;
+
+    // NDC → UV. Y инвертируется: NDC-Y вверх, UV вниз.
+    const float2 uv = float2(ndc.x * 0.5 + 0.5, 0.5 - ndc.y * 0.5);
+
+    // За пределами карты теней считаем освещённым.
+    if (any(uv < 0.0) || any(uv > 1.0) || ndc.z > 1.0) return 1.0;
+
+    const float currentDistance = ndc.z * shadow.farDistance;
+
+    // Ручной PCF 3×3. Аппаратного сравнения у нас нет, поэтому
+    // сравниваем каждую выборку сами и усредняем результат.
+    const float2 texelStep = 1.0 / float2(shadowMap.get_width(), shadowMap.get_height());
+
+    float sum = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            const float occluder =
+                shadowMap.sample(shadowSampler, uv + float2(x, y) * texelStep).r;
+            sum += (currentDistance - shadow.constantBias <= occluder) ? 1.0 : 0.0;
+        }
+    }
+    return sum / 9.0;
+}
+```
+
+**Сэмплер карты теней обязан быть `Nearest`.** Это принципиально: линейная фильтрация усреднила бы
+**расстояния** соседних текселей, а среднее двух расстояний не имеет физического смысла. На
+границе стены и пола линейная фильтрация даст расстояние, которого нет ни у одной поверхности, и
+результат сравнения окажется произвольным. Именно поэтому аппаратное сравнение делается **до**
+фильтрации — а раз его нет, мы обязаны сравнивать по каждому текселю отдельно и усреднять уже
+**результаты сравнения**, что PCF и делает.
+
+Девять выборок на пиксель — заметная, но приемлемая цена. Для мягких теней нужно больше; о том,
+как не платить за это линейно, — раздел 8.7.
+
+---
+
+## 8.4. Смещение: два дефекта, которые нельзя убрать одновременно
+
+Самая важная часть главы. Тени всегда имеют один из двух дефектов, и лечение одного усиливает
+другой.
+
+### Дефект 1: теневое акне
+
+Полосатый муар на освещённых поверхностях. Причина геометрическая.
+
+Тексель карты теней покрывает **площадку** на поверхности. Записанное расстояние соответствует
+одной точке этой площадки — а сравнивается со всеми точками. На наклонённой поверхности
+расстояния внутри площадки различаются, и половина точек оказывается «дальше» записанного
+значения, то есть в собственной тени.
+
+```
+       поверхность под углом
+            ╱
+           ╱ ← точка чуть дальше записанной → «в тени»
+    ──────●───────  ← записанное расстояние (центр текселя)
+         ╱  ← точка чуть ближе → «освещена»
+        ╱
+```
+
+Чем острее угол между поверхностью и лучом света, тем больше разброс — и тем сильнее акне.
+
+### Дефект 2: отрыв тени (peter-panning)
+
+Лечим акне, добавляя константу к сравнению. Достаточная константа убирает муар, но тень при этом
+«отъезжает» от объекта, и предмет начинает выглядеть парящим над полом. Название — от Питера
+Пэна, потерявшего свою тень.
+
+### Правильное лечение: смещение вдоль нормали
+
+Ключевое наблюдение: величина проблемы **зависит от угла**, а константа — нет. Значит, и смещение
+должно зависеть от угла.
+
+Приём: сдвигать точку выборки не вдоль луча света, а **вдоль нормали поверхности**, на величину
+порядка размера текселя в мировых единицах.
+
+```metal
+float3 offsetPosition = worldPosition + normal * (normalBias * texelWorldSize);
+```
+
+Почему это работает лучше константы: на поверхности, перпендикулярной лучу, разброса внутри
+текселя нет, и сдвиг вдоль нормали почти не меняет расстояние до источника — смещение
+самоустраняется. На поверхности под острым углом сдвиг вдоль нормали переводит точку заметно
+ближе к источнику — ровно там, где это и нужно.
+
+Правильная величина — **1–2 размера текселя**:
+
+```cpp
+// Ортографический объём шириной 2·sceneRadius на kShadowResolution текселей
+shadowUniforms.texelWorldSize = (2.0f * sceneRadius) / kShadowResolution;
+shadowUniforms.normalBias     = 1.5f;      // в текселях
+shadowUniforms.constantBias   = shadowUniforms.texelWorldSize * 0.5f;
+```
+
+Обратите внимание: `texelWorldSize` **в мировых единицах**, и `normalBias` задаётся в текселях.
+Это и есть выигрыш от хранения линейного расстояния: настройки имеют физический смысл и не
+приходится их подбирать заново при каждом изменении разрешения карты или размера сцены.
+
+### Про аппаратное смещение глубины
+
+В `RasterizerState` есть `depthBiasConstant` и `depthBiasSlope` — казалось бы, готовое решение.
+Но в нашей схеме оно **не работает так, как ожидается**: аппаратное смещение сдвигает значение,
+записываемое в **буфер глубины** и используемое в тесте, а мы храним расстояние в **цветовой**
+цели, и на неё смещение не влияет.
+
+Использовать его можно только вместе с классической схемой «сэмплируем буфер глубины», которая нам
+недоступна. Так что в этой главе смещение целиком в шейдере — и это, как выяснилось, даже удобнее.
+
+### Ещё один приём: рендерить в тень задние грани
+
+Если рисовать в карту теней только **задние** грани (`CullMode::Front`), акне пропадает
+полностью: записанные расстояния относятся к дальней стороне объекта, а сравниваем мы переднюю,
+и они гарантированно различаются на толщину.
+
+Работает идеально для замкнутых тел и **ломается на плоскостях**: у стены толщиной в один
+полигон задних граней нет, и она вообще перестаёт отбрасывать тень. В сценах архива плоскостей
+полно, поэтому приём применим выборочно — для замкнутых объектов, — а общая схема остаётся на
+смещении вдоль нормали.
+
+---
+
+## 8.5. Прожектор
+
+Прожектор — это точечный источник с ограниченным конусом. Проекция перспективная, карта одна.
+
+```cpp
+Mat4 spotLightMatrix(const Vec3& position, const Vec3& direction,
+                     float outerAngle, float range)
+{
+    const Vec3 up = std::abs(direction.y) > 0.99f ? Vec3{0, 0, 1} : Vec3{0, 1, 0};
+    const Mat4 view = lookAt(position, position + direction, up);
+
+    // Угол обзора равен полному углу конуса; near подальше — ради точности глубины.
+    const Mat4 projection = perspective(outerAngle * 2.0f, 1.0f, range * 0.01f, range);
+    return multiply(projection, view);
+}
+```
+
+Затухание по конусу:
+
+```metal
+float spotAttenuation(float3 L, float3 spotDirection,
+                      float cosInner, float cosOuter)
+{
+    const float cosAngle = dot(-L, spotDirection);
+    // smoothstep даёт мягкий край; линейная интерполяция дала бы видимую границу.
+    return smoothstep(cosOuter, cosInner, cosAngle);
+}
+```
+
+Код выборки тени из раздела 8.3 работает без изменений — деление на `w` там уже есть именно для
+этого случая.
+
+---
+
+## 8.6. Точечный источник: кубическая карта
+
+Точечный светит во все стороны, поэтому нужны шесть карт — по одной на грань куба. Наша обёртка
+это поддерживает напрямую.
+
+```cpp
+ImageDesc cubeDesc{};
+cubeDesc.type        = ImageType::CubeMap;
+cubeDesc.format      = ImageFormat::R32_FLOAT;
+cubeDesc.width       = 1024;
+cubeDesc.height      = 1024;
+cubeDesc.arrayLayers = 6;                 // для CubeMap ровно 6, иначе ошибка
+cubeDesc.usage       = ImageUsage::ColorTarget | ImageUsage::Sampled;
+cubeDesc.debugName   = "PointShadowCube";
+std::shared_ptr<GImage> shadowCube = device->createImage(cubeDesc);
+```
+
+Порядок граней фиксирован: **+X, −X, +Y, −Y, +Z, −Z**.
+
+```cpp
+// Направления взгляда и «верха» для каждой грани.
+const Vec3 faceForward[6] = {
+    { 1, 0, 0}, {-1, 0, 0}, {0,  1, 0}, {0, -1, 0}, {0, 0,  1}, {0, 0, -1}
+};
+const Vec3 faceUp[6] = {
+    {0, -1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}, {0, -1, 0}, {0, -1, 0}
+};
+
+for (uint32_t face = 0; face < 6; ++face) {
+    std::shared_ptr<RenderPassDescriptor> facePass = helper::createRenderPassDescriptor();
+    // Пятый параметр — слой. Именно так проход направляется в одну грань куба.
+    facePass->setColorAttachment(0, shadowCube, true, farClear, /*arrayLayer=*/face);
+    facePass->setDepthStencilAttachment(cubeDepth, true, 1.0f, false, 0);
+
+    const Mat4 faceView = lookAt(light.position,
+                                 light.position + faceForward[face], faceUp[face]);
+    const Mat4 faceProjection = perspective(1.5708f /* 90° */, 1.0f,
+                                            light.range * 0.01f, light.range);
+    const Mat4 faceMatrix = multiply(faceProjection, faceView);
+
+    cmd->beginRenderPass(facePass);
+    renderShadowCasters(cmd, faceMatrix, light.position, /*isPointLight=*/true);
+    cmd->endRenderPass();
+}
+```
+
+Шесть проходов на источник — дорого. Настолько, что тени от точечных источников в реальных
+движках имеют либо очень низкое разрешение, либо обновляются не каждый кадр, либо есть только у
+одного-двух главных ламп. **Обновляйте кубическую карту только когда источник или геометрия
+вокруг него изменились** — для статичной лампы в Sponza это один раз за всё время работы.
+
+Угол обзора ровно 90° — обязателен, иначе грани не состыкуются.
+
+Выборка:
+
+```metal
+float samplePointShadow(texturecube<float> shadowCube,
+                        sampler            shadowSampler,
+                        float3 worldPosition, float3 lightPosition,
+                        float3 normal, float bias)
+{
+    float3 toFragment = worldPosition - lightPosition;
+    const float currentDistance = length(toFragment);
+
+    // Направление выборки. Смещаем вдоль нормали, как и в 2D-случае.
+    toFragment += normal * bias;
+
+    // У кубической текстуры выборка идёт по НАПРАВЛЕНИЮ, а не по UV.
+    // Нормировать не обязательно — аппаратура делает это сама.
+    const float occluderDistance = shadowCube.sample(shadowSampler, toFragment).r;
+
+    return (currentDistance - bias <= occluderDistance) ? 1.0 : 0.0;
+}
+```
+
+PCF на кубической карте сложнее: смещать надо в касательной плоскости к направлению, а не по UV.
+Рабочее приближение — сдвиги по двум произвольным векторам, перпендикулярным направлению.
+
+---
+
+## 8.7. Каскадные карты теней
+
+Проблема направленного света в большой сцене: одна карта на всю сцену даёт слишком грубые тексели
+вблизи камеры, где дефекты как раз и заметны.
+
+Решение: несколько карт разного масштаба. Ближняя накрывает первые метры с высоким разрешением,
+дальняя — весь остаток с низким. Как мипы, только для теней.
+
+```cpp
+constexpr uint32_t kCascadeCount = 4;
+
+// Разбиение диапазона глубины. Практическая схема: смесь равномерного
+// и логарифмического, с коэффициентом около 0.75 в пользу логарифмического.
+std::array<float, kCascadeCount + 1> computeCascadeSplits(float nearZ, float farZ)
+{
+    std::array<float, kCascadeCount + 1> splits{};
+    splits[0] = nearZ;
+    for (uint32_t i = 1; i <= kCascadeCount; ++i) {
+        const float t = static_cast<float>(i) / kCascadeCount;
+        const float logarithmic = nearZ * std::pow(farZ / nearZ, t);
+        const float uniform     = nearZ + (farZ - nearZ) * t;
+        splits[i] = 0.75f * logarithmic + 0.25f * uniform;
+    }
+    return splits;
+}
+```
+
+Хранение — массив текстур, по слою на каскад:
+
+```cpp
+ImageDesc cascadeDesc{};
+cascadeDesc.type        = ImageType::Image2D;
+cascadeDesc.format      = ImageFormat::R32_FLOAT;
+cascadeDesc.width       = kShadowResolution;
+cascadeDesc.height      = kShadowResolution;
+cascadeDesc.arrayLayers = kCascadeCount;
+cascadeDesc.usage       = ImageUsage::ColorTarget | ImageUsage::Sampled;
+std::shared_ptr<GImage> cascades = device->createImage(cascadeDesc);
+
+// Проход на каскад, каждый пишет в свой слой.
+for (uint32_t i = 0; i < kCascadeCount; ++i) {
+    pass->setColorAttachment(0, cascades, true, farClear, /*arrayLayer=*/i);
+    // ...
+}
+```
+
+Выбор каскада в шейдере — по линейной глубине, которая у нас уже есть в G-буфере:
+
+```metal
+uint selectCascade(float viewDepth, constant float4& splits)
+{
+    if (viewDepth < splits.x) return 0;
+    if (viewDepth < splits.y) return 1;
+    if (viewDepth < splits.z) return 2;
+    return 3;
+}
+
+// Выборка из массива текстур: третий аргумент — номер слоя.
+const float occluder = cascadeMaps.sample(shadowSampler, uv, cascadeIndex).r;
+```
+
+### Дрожание краёв
+
+Основной дефект каскадов: при движении камеры объём каскада смещается, тексели попадают на другие
+точки сцены, и края теней «кипят».
+
+Лечение — **привязать объём каскада к сетке текселей**: округлять его положение до целого числа
+текселей.
+
+```cpp
+const float texelSize = (2.0f * cascadeRadius) / kShadowResolution;
+center.x = std::floor(center.x / texelSize) * texelSize;
+center.y = std::floor(center.y / texelSize) * texelSize;
+center.z = std::floor(center.z / texelSize) * texelSize;
+```
+
+Тогда при движении камеры карта сдвигается ровно на целые тексели, и точки сцены остаются в тех
+же текселях. Дрожание пропадает полностью. Приём обязателен — без него каскады выглядят
+откровенно плохо в движении, что как раз и видно на видео.
+
+### Швы между каскадами
+
+На границе двух каскадов разрешение меняется скачком, и виден шов. Лечение — плавный переход:
+в узкой полосе вокруг границы выбирать оба каскада и смешивать по расстоянию. Стоит двух выборок
+вместо одной на небольшой части экрана.
+
+---
+
+## 8.8. Бюджет
+
+```
+Направленный, 4 каскада 2048²:  4 × 16.8 МБ = 67 МБ (+ 16.8 МБ общая глубина)
+Прожектор,        1024²:        4.2 МБ
+Точечный, куб     1024²:        6 × 4.2 МБ = 25 МБ
+```
+
+Отсюда практическая политика для сцен архива:
+
+- Один направленный источник с каскадами — **всегда**, это солнце.
+- Тени от прожекторов — у двух-трёх главных, остальные без теней.
+- Тени от точечных источников — только там, где без них разваливается композиция; обновлять по
+  необходимости, а не каждый кадр.
+
+Двести источников света в главе 7 и двести теней — принципиально разные по стоимости вещи.
+Отсутствие тени у мелкой лампы почти незаметно; отсутствие тени от солнца заметно всегда.
+
+---
+
+## 8.9. Что обычно ломается
+
+| Симптом | Причина |
+|---|---|
+| Вся сцена в тени | Карта очищена нулём вместо большого значения |
+| Полосатый муар на освещённых поверхностях | Нет смещения вдоль нормали |
+| Тень «отъехала», объект парит | Слишком большая константа смещения |
+| Тень с рваными краями | Линейный сэмплер вместо `Nearest` |
+| Края тени «кипят» при движении камеры | Каскады не привязаны к сетке текселей |
+| Тени только вблизи | Ортографический объём меньше сцены |
+| Листва отбрасывает прямоугольную тень | Нет варианта теневого шейдера с `discard` |
+| Грани кубической карты не стыкуются | Угол обзора не ровно 90° |
+| Тонкие стены не отбрасывают тень | Включён `CullMode::Front` в теневом проходе |
+| Ошибка при привязке буфера глубины | Так нельзя; пишите расстояние в `R32_FLOAT` |
+| Матрица источника вырождена | Свет почти вертикально, «верх» коллинеарен направлению |
+
+---
+
+## 8.10. Проверка
+
+1. **Отладочный вывод карты теней** полноэкранным проходом. Должен читаться силуэт сцены с
+   плавным градиентом расстояний. Плоский цвет — проход не отрисовался.
+2. **Проверка контакта.** Поставьте куб на плоскость. Тень обязана начинаться **ровно** у
+   основания. Зазор — смещение слишком велико. Муар на плоскости — слишком мало.
+3. **Проверка при скользящем свете.** Опустите солнце почти к горизонту — самый тяжёлый случай.
+   Смещение вдоль нормали должно справиться там, где константа уже не справляется.
+4. **Проверка каскадов.** Раскрасьте каскады цветами (первый красный, второй зелёный…). Границы
+   должны быть концентричны вокруг камеры и плавно двигаться при её перемещении, без скачков.
+5. **Проверка дрожания.** Медленно ведите камеру вбок и смотрите на край тени. Он должен быть
+   неподвижен относительно сцены. «Кипение» — не работает привязка к сетке.
+6. **Проверка стоимости.** Измерьте время кадра с тенями и без. Проход теней на 4 каскада — это
+   4 полные растеризации сцены; на San Miguel это будет заметно, и в главе 12 мы это оптимизируем
+   отсечением по объёму каскада.
+
+---
+
+## Итог
+
+1. **Буфер глубины сэмплировать нельзя, сравнивающего сэмплера нет.** Обход один: пишем линейное
+   расстояние в `R32_FLOAT` и сравниваем в шейдере. Настройки при этом получают физический смысл.
+2. Карта теней читается **только** сэмплером `Nearest`. Усреднять расстояния нельзя — усредняем
+   результаты сравнений, это и есть PCF.
+3. Акне и отрыв тени — два конца одного компромисса. **Смещение вдоль нормали** на 1–2 текселя
+   решает задачу лучше константы, потому что зависит от угла.
+4. Аппаратное `depthBias` в нашей схеме не действует: оно влияет на буфер глубины, а мы храним
+   расстояние в цвете.
+5. Кубическая карта — шесть проходов, ровно 90° на грань, порядок +X, −X, +Y, −Y, +Z, −Z.
+   Обновлять по необходимости, а не каждый кадр.
+6. Каскады **обязаны** быть привязаны к сетке текселей, иначе края кипят в движении.
+7. Теней всегда меньше, чем источников. Это осознанное решение, а не упущение.
+
+Дальше — [Часть IX. Прозрачность](09-prozrachnost.ru.md): листва Sponza, стекло и то, почему
+отложенный рендеринг с ними не работает.
