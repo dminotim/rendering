@@ -112,6 +112,31 @@ namespace dmrender {
         DepthStencilState depthStencil{};
         RasterizerState rasterizer{};
 
+        /**
+         * @brief What kind of buffer each of the eight buffer slots carries.
+         *
+         * Must match what the shader declares, slot for slot. The default — slot 0 a storage
+         * buffer for geometry, slots 1..7 uniform blocks — is what every shader written before
+         * this field existed expects, so leaving it alone changes nothing.
+         *
+         * Declare a slot as Storage to hand the shader an array it indexes per thread: instance
+         * transforms by `[[instance_id]]`, bone matrices, a material table. A uniform block cannot
+         * portably hold more than 16 KiB, which works out to 256 4x4 matrices; a storage buffer
+         * has no such ceiling.
+         *
+         * @code
+         * PipelineDesc desc{};
+         * desc.bufferSlots = defaultBufferSlotLayout();
+         * desc.bufferSlots[2] = BufferBindingType::Storage;   // instances, indexed per thread
+         * @endcode
+         *
+         * @note This has to be declared rather than deduced because Vulkan bakes descriptor types
+         *       into the pipeline layout at creation time. On Metal it makes no difference to the
+         *       generated code — `constant T&` and `const device T*` are both just a buffer at an
+         *       index — so the field exists to keep one shader source valid on both backends.
+         */
+        BufferSlotLayout bufferSlots = defaultBufferSlotLayout();
+
         std::string debugName;
     };
 

@@ -1,5 +1,7 @@
 #include "VulkanSampler.hpp"
 
+#include <algorithm>
+
 #include <render_vulkan/VulkanDevice.hpp>
 #include <render_vulkan/VulkanUtils.hpp>
 
@@ -32,10 +34,15 @@ namespace dmrender {
             : VK_SAMPLER_MIPMAP_MODE_LINEAR;
         info.minLod = desc.minLod;
         info.maxLod = desc.maxLod;
-        // Anisotropy is a device feature that has to be enabled at device creation; the
-        // abstraction does not expose it, so it stays off on both backends.
-        info.anisotropyEnable = VK_FALSE;
-        info.maxAnisotropy = 1.0f;
+
+        // Clamp rather than reject: a caller asking for 16 on hardware that offers 8 wants the
+        // best available, not an error. maxSupportedAnisotropy() reports 1 when the device feature
+        // could not be enabled, which switches this off entirely.
+        const uint32_t supported = device->maxSupportedAnisotropy();
+        const uint32_t requested = std::min(std::max(desc.maxAnisotropy, 1u), supported);
+        info.anisotropyEnable = requested > 1 ? VK_TRUE : VK_FALSE;
+        info.maxAnisotropy = static_cast<float>(requested);
+
         info.compareEnable = VK_FALSE;
         info.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
         info.unnormalizedCoordinates = VK_FALSE;

@@ -123,6 +123,16 @@ namespace dmrender {
         }
     }
 
+    void MetalCommandBuffer::setStorageBuffer(uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset)
+    {
+        // Metal draws no distinction between a uniform block and a storage buffer: both are just
+        // a buffer bound at an index, and only the shader's address space qualifier
+        // (`constant T&` versus `const device T*`) differs. Vulkan has to know the difference
+        // because it is baked into the descriptor set layout, which is why the two setters exist
+        // at all; here they are the same call.
+        setUniformBuffer(slot, stage, buffer, offset);
+    }
+
     void MetalCommandBuffer::setTexture(uint32_t slot, ShaderStage stage, const std::shared_ptr<GImage>& image,
                                         const std::shared_ptr<GSampler>& sampler)
     {

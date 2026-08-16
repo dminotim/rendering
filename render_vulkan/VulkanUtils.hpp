@@ -35,20 +35,13 @@ namespace dmrender {
     inline constexpr uint32_t kFramesInFlight = 2;
 
     /**
-     * @brief Highest buffer binding slot the backend reserves in descriptor set 0.
+     * @brief Backend spelling of the public kMaxBufferSlots.
      *
-     * Slot 0 is the vertex storage buffer, slots 1..kMaxBindingSlots-1 are uniform buffers.
+     * Which slots are storage buffers and which are uniform blocks is no longer fixed: it comes
+     * from PipelineDesc::bufferSlots, and the backend builds one descriptor set layout per
+     * distinct arrangement. See VulkanDevice::acquireBufferSetLayout().
      */
-    inline constexpr uint32_t kMaxBindingSlots = 8;
-
-    /**
-     * @brief Highest texture binding slot the backend reserves in descriptor set 1.
-     *
-     * Textures live in their own descriptor set because they live in their own numbering space
-     * in the interface — `setTexture(0, …)` and `setUniformBuffer(0, …)` are different bindings,
-     * matching Metal's separate `[[texture(n)]]` and `[[buffer(n)]]` indices.
-     */
-    inline constexpr uint32_t kMaxTextureSlots = 8;
+    inline constexpr uint32_t kMaxBindingSlots = kMaxBufferSlots;
 
     /// @brief Descriptor set index holding buffers (`set = 0` in GLSL).
     inline constexpr uint32_t kBufferDescriptorSet = 0;

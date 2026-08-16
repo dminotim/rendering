@@ -1,7 +1,9 @@
 #include "render_vulkan/VulkanCommandBuffer.hpp"
 
+#include <algorithm>
 #include <array>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <render_vulkan/VulkanBuffer.hpp>
@@ -17,12 +19,14 @@
 namespace dmrender
 {
 
-    /// @brief One remembered `setVertexBuffer` / `setUniformBuffer` call.
+    /// @brief One remembered `setVertexBuffer` / `setUniformBuffer` / `setStorageBuffer` call.
     struct BoundBuffer
     {
         VulkanBuffer* buffer = nullptr;
-        VkDeviceSize offset = 0;
-        VkDescriptorType descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        /// Where the frame's region starts. Zero for everything but a dynamic buffer.
+        VkDeviceSize regionOffset = 0;
+        /// The offset the caller asked for, within that region.
+        VkDeviceSize userOffset = 0;
     };
 
     /// @brief One remembered `setTexture` call.
@@ -67,7 +71,8 @@ namespace dmrender
                                     VkDescriptorSetLayout layout)
         {
             // The layout is part of the key because two pipelines with different layouts cannot
-            // share a set even when the same resources are bound.
+            // share a set even when the same resources are bound. It also settles each slot's
+            // descriptor type, so that need not be hashed separately.
             uint64_t hash = kHashSeed;
             hashCombine(hash, reinterpret_cast<uint64_t>(layout));
             for (uint32_t slot = 0; slot < kMaxBindingSlots; ++slot) {
@@ -75,9 +80,9 @@ namespace dmrender
                 if (!bound.buffer) continue;
                 hashCombine(hash, slot);
                 hashCombine(hash, reinterpret_cast<uint64_t>(bound.buffer->buffer()));
-                hashCombine(hash, static_cast<uint64_t>(bound.offset));
+                hashCombine(hash, static_cast<uint64_t>(bound.regionOffset));
+                hashCombine(hash, static_cast<uint64_t>(bound.userOffset));
                 hashCombine(hash, static_cast<uint64_t>(bound.buffer->size()));
-                hashCombine(hash, static_cast<uint64_t>(bound.descriptorType));
             }
             return hash;
         }
@@ -301,9 +306,7 @@ namespace dmrender
         }
         auto* vulkanBuffer = static_cast<VulkanBuffer*>(buffer.get());
         m_data->bindings[slot] = BoundBuffer{
-            vulkanBuffer,
-            vulkanBuffer->currentRegionOffset() + offset,
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+            vulkanBuffer, vulkanBuffer->currentRegionOffset(), offset
         };
     }
 
@@ -320,11 +323,29 @@ namespace dmrender
         // A single descriptor binding already covers both the vertex and the fragment stage, so
         // the two calls the application makes for slot 1 collapse into one write. Metal needs the
         // pair because it binds per stage; here the second call is simply idempotent.
+        //
+        // Which descriptor type gets written is not decided here: it comes from the pipeline's
+        // declared slot layout at draw time. Calling this setter for a slot the pipeline declares
+        // as storage still works, because the intent — "this buffer, at this slot" — is the same.
         auto* vulkanBuffer = static_cast<VulkanBuffer*>(buffer.get());
         m_data->bindings[slot] = BoundBuffer{
-            vulkanBuffer,
-            vulkanBuffer->currentRegionOffset() + offset,
-            VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+            vulkanBuffer, vulkanBuffer->currentRegionOffset(), offset
+        };
+    }
+
+    void VulkanCommandBuffer::setStorageBuffer(
+        uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset)
+    {
+        if (!buffer) return;
+        if (slot >= kMaxBindingSlots) {
+            throw std::runtime_error("setStorageBuffer: slot is outside the supported range");
+        }
+        if (stage == ShaderStage::Compute) {
+            throw std::runtime_error("setStorageBuffer: compute stage is not valid inside a render pass");
+        }
+        auto* vulkanBuffer = static_cast<VulkanBuffer*>(buffer.get());
+        m_data->bindings[slot] = BoundBuffer{
+            vulkanBuffer, vulkanBuffer->currentRegionOffset(), offset
         };
     }
 
@@ -439,9 +460,48 @@ namespace dmrender
 
             if (!bufferSet) bufferSet = allocate(m_data->pipeline->bufferSetLayout());
 
+            // The pipeline's layout decides the descriptor type, not the setter that was called.
+            // It has to: the layout is what the shader was compiled against, and writing a
+            // descriptor of any other type into it is invalid. The setters differ only in how
+            // they read at the call site.
+            const VkDescriptorType descriptorType = m_data->pipeline->descriptorTypeForSlot(slot);
+            const bool wantsStorage = descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            const VkBufferUsageFlags required = wantsStorage
+                ? VK_BUFFER_USAGE_STORAGE_BUFFER_BIT
+                : VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+
+            if ((bound.buffer->usageFlags() & required) == 0) {
+                throw std::runtime_error(
+                    std::string("draw: the pipeline declares buffer slot ") + std::to_string(slot) +
+                    (wantsStorage ? " as a storage buffer, but the buffer bound there was not"
+                                    " created for that role. Create it with BufferType::Uniform"
+                                    " (which supports both) or BufferType::Vertex."
+                                  : " as a uniform block, but the buffer bound there was not"
+                                    " created for that role. Create it with BufferType::Uniform,"
+                                    " or declare the slot as BufferBindingType::Storage."));
+            }
+
+            // The visible window is what is left of the region after the caller's offset. Using
+            // the whole size would run past the end of the region whenever offset > 0 — which is
+            // exactly what batching instances out of one large buffer does.
+            VkDeviceSize range = bound.buffer->size() > bound.userOffset
+                ? bound.buffer->size() - bound.userOffset
+                : 0;
+            if (range == 0) {
+                throw std::runtime_error(
+                    std::string("draw: buffer slot ") + std::to_string(slot) +
+                    " was bound with an offset at or past the end of the buffer");
+            }
+            if (!wantsStorage) {
+                // A uniform descriptor may not span more than the device allows, and a large
+                // buffer bound with a small offset would otherwise trip that limit.
+                range = std::min<VkDeviceSize>(
+                    range, m_data->device->properties().limits.maxUniformBufferRange);
+            }
+
             bufferInfos[slot].buffer = bound.buffer->buffer();
-            bufferInfos[slot].offset = bound.offset;
-            bufferInfos[slot].range = bound.buffer->size();
+            bufferInfos[slot].offset = bound.regionOffset + bound.userOffset;
+            bufferInfos[slot].range = range;
 
             VkWriteDescriptorSet write{};
             write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -449,7 +509,7 @@ namespace dmrender
             write.dstBinding = slot;
             write.dstArrayElement = 0;
             write.descriptorCount = 1;
-            write.descriptorType = bound.descriptorType;
+            write.descriptorType = descriptorType;
             write.pBufferInfo = &bufferInfos[slot];
             writes.push_back(write);
         }

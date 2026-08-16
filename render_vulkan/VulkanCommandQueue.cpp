@@ -32,8 +32,18 @@ namespace dmrender
 	};
 
 	namespace {
-		/// One descriptor set is consumed per draw call; the whole pool is reset once per frame.
-		constexpr uint32_t kDescriptorSetsPerFrame = 256;
+		/**
+		 * @brief Distinct binding states a frame may use before the pool is exhausted.
+		 *
+		 * Not the number of draw calls: the command buffer caches sets by binding hash, so draws
+		 * that differ only in push constants share one. What has to fit is the number of
+		 * *distinct* combinations — in practice one per material.
+		 *
+		 * Sized for a real scene rather than a demo. San Miguel has 281 materials, which the
+		 * previous ceiling of 256 would have run into partway through the first frame. Descriptor
+		 * sets are cheap; the pool is a few megabytes at this size and is reset every frame.
+		 */
+		constexpr uint32_t kDescriptorSetsPerFrame = 4096;
 	}
 
 	VulkanCommandQueues::VulkanCommandQueues(const std::shared_ptr<Device>& device)

@@ -24,11 +24,19 @@ namespace dmrender {
      * `commit()` closes it, submits it and presents, then hands the slot back to the queue.
      *
      * @par Deferred binding
-     * `setVertexBuffer()`, `setUniformBuffer()` and `setTexture()` only remember what was bound.
-     * The actual descriptor sets are allocated, written and bound lazily on the next draw call,
-     * because Vulkan needs the pipeline's descriptor set layouts — only known once a pipeline is
-     * set — and because one `vkUpdateDescriptorSets` can then cover every slot at once. Buffers
-     * land in set 0 and textures in set 1; a set with nothing bound is never allocated.
+     * `setVertexBuffer()`, `setUniformBuffer()`, `setStorageBuffer()` and `setTexture()` only
+     * remember what was bound. The actual descriptor sets are allocated, written and bound lazily
+     * on the next draw call, because Vulkan needs the pipeline's descriptor set layouts — only
+     * known once a pipeline is set — and because one `vkUpdateDescriptorSets` can then cover every
+     * slot at once. Buffers land in set 0 and textures in set 1; a set with nothing bound is never
+     * allocated.
+     *
+     * @par Where a slot's descriptor type comes from
+     * Not from which setter was called. The pipeline's layout fixes it, because that layout is
+     * what the shader was compiled against, and it is chosen at pipeline creation from
+     * PipelineDesc::bufferSlots. The three buffer setters are therefore interchangeable in effect
+     * and differ only in how they read at the call site — with one check kept: a buffer whose
+     * allocation cannot serve the role the pipeline asks for is reported rather than bound.
      */
     class VulkanCommandBuffer : public CommandBuffer {
     public:
@@ -40,6 +48,8 @@ namespace dmrender {
         void setVertexBuffer(
             uint32_t slot, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
         void setUniformBuffer(
+            uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
+        void setStorageBuffer(
             uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset) override;
         void setTexture(
             uint32_t slot, ShaderStage stage, const std::shared_ptr<GImage>& image,

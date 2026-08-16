@@ -89,6 +89,31 @@ namespace dmrender {
         virtual void setUniformBuffer(uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset = 0) = 0;
 
         /**
+         * @brief Binds a buffer the shader indexes per thread.
+         *
+         * The counterpart of setUniformBuffer() for data too large or too varied for a uniform
+         * block: instance transforms read by `[[instance_id]]`, bone matrices, a table of
+         * materials. A uniform block has a portable ceiling of 16 KiB — 256 4x4 matrices — while a
+         * storage buffer is limited only by memory.
+         *
+         * @pre A render pass must be active.
+         * @pre The pipeline in use must declare this slot as BufferBindingType::Storage in
+         *      PipelineDesc::bufferSlots, and the shader must declare it to match.
+         *
+         * @param slot The binding slot, in [0, kMaxBufferSlots).
+         * @param stage The shader stage that reads it.
+         * @param buffer The buffer. Any BufferType works; the type only decides which extra usage
+         *               the underlying allocation carries.
+         * @param offset Byte offset from the start of the buffer. Handy for feeding successive
+         *               batches out of one large buffer.
+         *
+         * @note Slot 0 already defaults to a storage buffer, which is what setVertexBuffer() binds
+         *       to. The two calls are interchangeable there; setVertexBuffer() simply reads better
+         *       at the point where geometry is bound.
+         */
+        virtual void setStorageBuffer(uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset = 0) = 0;
+
+        /**
          * @brief Binds a texture and its sampler to a specified slot for a given shader stage.
          * @pre A render pass must be active.
          * @pre The image must have been created with ImageUsage::Sampled.

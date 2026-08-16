@@ -45,6 +45,33 @@ namespace dmrender {
      * GLSL declares `layout(push_constant) uniform Block { ... };` while MSL takes an ordinary
      * `constant Block&` at buffer index @c kPushConstantBufferSlot, because Metal has no push
      * constants. The C++ call, `CommandBuffer::setPushConstants()`, is identical.
+     *
+     * @section slots Buffer slots: the type is declared, not inferred
+     *
+     * A buffer slot carries either a uniform block or a storage buffer, and which one is fixed by
+     * PipelineDesc::bufferSlots — it cannot be worked out from what happens to be bound at draw
+     * time, because Vulkan bakes each binding's descriptor type into the pipeline layout the
+     * shader is compiled against.
+     *
+     * The shader must declare the same thing:
+     *
+     * | Slot type | GLSL | MSL |
+     * |---|---|---|
+     * | Uniform | `layout(std140, set=0, binding=n) uniform B { … }` | `constant T& b [[buffer(n)]]` |
+     * | Storage | `layout(std430, set=0, binding=n) readonly buffer B { T v[]; }` | `const device T* b [[buffer(n)]]` |
+     *
+     * Textures are a separate numbering space and always combined image samplers:
+     * `layout(set=1, binding=n) uniform sampler2D` in GLSL, `texture2d<float> [[texture(n)]]` plus
+     * `sampler [[sampler(n)]]` with the same index in MSL.
+     *
+     * @section layout Struct layout is the caller's responsibility
+     *
+     * A `vec3` inside an array occupies 16 bytes, not 12, under both std140/std430 and MSL's
+     * rules — a C++ struct of three `float[3]` members will not match a shader struct of three
+     * `float3` members. Either pad explicitly to a multiple of 16, or use only scalar members
+     * (which align to 4 and therefore pack tightly), or use MSL's `packed_*` types. Whichever you
+     * choose, assert the size: `static_assert(sizeof(Vertex) == 48, "")` catches at compile time
+     * what otherwise shows up as sheared or exploded geometry.
      */
 
     /**

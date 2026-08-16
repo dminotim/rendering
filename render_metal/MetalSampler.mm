@@ -1,6 +1,8 @@
 #include "MetalSampler.hpp"
 #import "MetalUtilsCpp.hpp"
 
+#include <algorithm>
+
 #import <Metal/Metal.h>
 
 namespace dmrender {
@@ -20,10 +22,21 @@ namespace dmrender {
         MTLSamplerDescriptor* descriptor = [[MTLSamplerDescriptor alloc] init];
         descriptor.minFilter = ToMTLSamplerMinMagFilter(desc.minFilter);
         descriptor.magFilter = ToMTLSamplerMinMagFilter(desc.magFilter);
-        descriptor.mipFilter = MTLSamplerMipFilterLinear;
+        descriptor.mipFilter = (desc.mipFilter == SamplerFilter::Nearest)
+            ? MTLSamplerMipFilterNearest
+            : MTLSamplerMipFilterLinear;
         descriptor.sAddressMode = ToMTLSamplerAddressMode(desc.addressU);
         descriptor.tAddressMode = ToMTLSamplerAddressMode(desc.addressV);
         descriptor.rAddressMode = ToMTLSamplerAddressMode(desc.addressW);
+        descriptor.lodMinClamp = desc.minLod;
+        descriptor.lodMaxClamp = desc.maxLod;
+
+        // Metal caps anisotropy at 16 and rejects anything outside [1, 16] outright, so clamp
+        // rather than pass the value through. maxSupportedAnisotropy() reports the same ceiling.
+        const uint32_t requested = std::min(std::max(desc.maxAnisotropy, 1u),
+                                            device->maxSupportedAnisotropy());
+        descriptor.maxAnisotropy = requested;
+
         if (!debugName.empty()) {
             descriptor.label = [NSString stringWithUTF8String:debugName.c_str()];
         }

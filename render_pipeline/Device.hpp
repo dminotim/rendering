@@ -145,6 +145,16 @@ namespace dmrender
         virtual SampleCount maxSupportedSampleCount() const = 0;
 
         /**
+         * @brief The largest useful value for SamplerDesc::maxAnisotropy on this device.
+         *
+         * 16 on essentially all desktop hardware, and 1 only where the feature is missing
+         * entirely. Sampler creation clamps to this, so querying is only necessary when the
+         * number itself is wanted — to populate a quality setting, or to decide whether to offer
+         * the option at all.
+         */
+        virtual uint32_t maxSupportedAnisotropy() const = 0;
+
+        /**
          * @brief Retrieves the native, backend-specific handle for the logical device.
          * @return A void pointer to the native object (e.g., id<MTLDevice>, VkDevice).
          * @note Use with caution, as this breaks the abstraction layer.

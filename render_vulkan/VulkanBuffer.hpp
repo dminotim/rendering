@@ -77,6 +77,15 @@ namespace dmrender {
         VkBuffer buffer() const;
 
         /**
+         * @brief The VkBufferUsageFlags the allocation was created with.
+         *
+         * Checked before a descriptor is written: a pipeline may declare a slot as a storage
+         * buffer while the buffer bound there was created without STORAGE_BUFFER_BIT, and that
+         * combination has to be reported rather than left to produce undefined results.
+         */
+        VkBufferUsageFlags usageFlags() const;
+
+        /**
          * @brief Byte offset of the region that should be bound for the frame being recorded.
          * @return 0 for static buffers, `frameSlot * regionStride` for dynamic ones.
          */

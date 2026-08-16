@@ -32,6 +32,19 @@ namespace dmrender {
             case ImageFormat::RGBA16_FLOAT:      return VK_FORMAT_R16G16B16A16_SFLOAT;
             case ImageFormat::R32_FLOAT:         return VK_FORMAT_R32_SFLOAT;
 
+            case ImageFormat::RGBA8_SRGB:        return VK_FORMAT_R8G8B8A8_SRGB;
+            case ImageFormat::BGRA8_SRGB:        return VK_FORMAT_B8G8R8A8_SRGB;
+
+            case ImageFormat::R8_UNORM:          return VK_FORMAT_R8_UNORM;
+            case ImageFormat::RG8_UNORM:         return VK_FORMAT_R8G8_UNORM;
+            case ImageFormat::R16_FLOAT:         return VK_FORMAT_R16_SFLOAT;
+            case ImageFormat::RG16_FLOAT:        return VK_FORMAT_R16G16_SFLOAT;
+            // Packed formats name their components from the most significant bit down, so the
+            // Vulkan name reads backwards relative to Metal's MTLPixelFormatRGB10A2Unorm. The bit
+            // layout is identical; only the naming convention differs.
+            case ImageFormat::RGB10A2_UNORM:     return VK_FORMAT_A2B10G10R10_UNORM_PACK32;
+            case ImageFormat::R11G11B10_FLOAT:   return VK_FORMAT_B10G11R11_UFLOAT_PACK32;
+
             case ImageFormat::D32_FLOAT:         return VK_FORMAT_D32_SFLOAT;
             case ImageFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
             case ImageFormat::D16_UNORM:         return VK_FORMAT_D16_UNORM;
@@ -59,6 +72,16 @@ namespace dmrender {
             case VK_FORMAT_B8G8R8A8_UNORM:      return ImageFormat::BGRA8_UNORM;
             case VK_FORMAT_R16G16B16A16_SFLOAT: return ImageFormat::RGBA16_FLOAT;
             case VK_FORMAT_R32_SFLOAT:          return ImageFormat::R32_FLOAT;
+
+            case VK_FORMAT_R8G8B8A8_SRGB:       return ImageFormat::RGBA8_SRGB;
+            case VK_FORMAT_B8G8R8A8_SRGB:       return ImageFormat::BGRA8_SRGB;
+
+            case VK_FORMAT_R8_UNORM:            return ImageFormat::R8_UNORM;
+            case VK_FORMAT_R8G8_UNORM:          return ImageFormat::RG8_UNORM;
+            case VK_FORMAT_R16_SFLOAT:          return ImageFormat::R16_FLOAT;
+            case VK_FORMAT_R16G16_SFLOAT:       return ImageFormat::RG16_FLOAT;
+            case VK_FORMAT_A2B10G10R10_UNORM_PACK32: return ImageFormat::RGB10A2_UNORM;
+            case VK_FORMAT_B10G11R11_UFLOAT_PACK32:  return ImageFormat::R11G11B10_FLOAT;
 
             case VK_FORMAT_D32_SFLOAT:          return ImageFormat::D32_FLOAT;
             case VK_FORMAT_D24_UNORM_S8_UINT:   return ImageFormat::D24_UNORM_S8_UINT;

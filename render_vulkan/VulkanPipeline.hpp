@@ -73,6 +73,16 @@ namespace dmrender {
         /// @brief Layout of descriptor set 1 (combined image samplers).
         VkDescriptorSetLayout textureSetLayout() const;
 
+        /**
+         * @brief The descriptor type this pipeline's layout declares for @p slot.
+         *
+         * The command buffer writes descriptors of this type regardless of which setter the
+         * application called, because the layout is what the shader was compiled against and a
+         * mismatch is invalid. Whether the bound buffer can serve in that role is checked
+         * separately.
+         */
+        VkDescriptorType descriptorTypeForSlot(uint32_t slot) const;
+
     private:
         std::unique_ptr<VulkanPipelineNativeData> m_data;
         std::string m_debugName;

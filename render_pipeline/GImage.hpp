@@ -34,6 +34,49 @@ namespace dmrender {
         RGBA16_FLOAT,       ///< 16-bit per channel, floating point.
         R32_FLOAT,          ///< Single 32-bit floating point channel.
 
+        /**
+         * @brief sRGB variants of the 8-bit formats.
+         *
+         * The hardware decodes sRGB to linear on read and encodes linear to sRGB on write, both
+         * for free and — crucially — on the correct side of filtering. Doing the conversion with
+         * pow() in a shader happens *after* the texture unit has already blended neighbouring
+         * texels in sRGB space, which is subtly wrong on sharp colour boundaries.
+         *
+         * Use these for colour data: albedo textures, and the swapchain surface itself. Never for
+         * data textures such as normal, roughness or mask maps, which are stored linearly.
+         */
+        RGBA8_SRGB,
+        BGRA8_SRGB,
+
+        // --- Narrow and packed colour formats ---
+        //
+        // Chiefly for render targets whose cost is measured in bytes per pixel per frame. A
+        // G-buffer that stores a normal in RGB10A2 rather than RGBA16_FLOAT halves that
+        // attachment's bandwidth at no visible quality cost, and a single-channel mask in R8
+        // costs a quarter of what RGBA8 does.
+
+        R8_UNORM,           ///< 1 byte. Masks, ambient occlusion, single-channel data.
+        RG8_UNORM,          ///< 2 bytes. Octahedral normals, two-channel data.
+        R16_FLOAT,          ///< 2 bytes. Half-precision single channel; linear depth at short range.
+        RG16_FLOAT,         ///< 4 bytes. Velocity buffers, two-channel high-precision data.
+
+        /**
+         * @brief 4 bytes, 10 bits each for RGB and 2 for alpha.
+         *
+         * The standard normal format for a G-buffer: 10 bits per axis is enough that banding on
+         * smooth shaded surfaces disappears, at half the cost of RGBA16_FLOAT. Unsigned, so a
+         * signed normal must be mapped into [0, 1] and back.
+         */
+        RGB10A2_UNORM,
+
+        /**
+         * @brief 4 bytes, floating point with no alpha channel.
+         *
+         * Half the size of RGBA16_FLOAT for HDR colour, which matters for a full-resolution
+         * lighting target or a bloom chain. The trade is no alpha and no negative values.
+         */
+        R11G11B10_FLOAT,
+
         // Depth/stencil formats
         D32_FLOAT,          ///< 32-bit floating point depth.
         D24_UNORM_S8_UINT,  ///< 24-bit normalized depth, 8-bit unsigned integer stencil.
@@ -79,14 +122,23 @@ namespace dmrender {
         switch (format) {
             case ImageFormat::RGBA8_UNORM:
             case ImageFormat::BGRA8_UNORM:
+            case ImageFormat::RGBA8_SRGB:
+            case ImageFormat::BGRA8_SRGB:
             case ImageFormat::R32_FLOAT:
+            case ImageFormat::RG16_FLOAT:
+            case ImageFormat::RGB10A2_UNORM:
+            case ImageFormat::R11G11B10_FLOAT:
             case ImageFormat::D32_FLOAT:
             case ImageFormat::D24_UNORM_S8_UINT:
                 return { 1, 1, 4, false };
             case ImageFormat::RGBA16_FLOAT:
                 return { 1, 1, 8, false };
+            case ImageFormat::RG8_UNORM:
+            case ImageFormat::R16_FLOAT:
             case ImageFormat::D16_UNORM:
                 return { 1, 1, 2, false };
+            case ImageFormat::R8_UNORM:
+                return { 1, 1, 1, false };
 
             // 4x4 blocks at 8 bytes: 4 bits per texel.
             case ImageFormat::BC1_RGBA_UNORM:
@@ -111,6 +163,26 @@ namespace dmrender {
     /// @brief True when @p format stores compressed blocks rather than individual texels.
     inline bool isCompressedFormat(ImageFormat format) {
         return formatInfo(format).compressed;
+    }
+
+    /**
+     * @brief True when the hardware converts between sRGB and linear for this format.
+     *
+     * Worth checking before a shader applies its own conversion: doing both gives a picture that
+     * is too dark, and doing neither gives one that is too washed out. Both look plausible enough
+     * to survive a casual glance, which is why this is worth being explicit about.
+     */
+    inline bool isSrgbFormat(ImageFormat format) {
+        switch (format) {
+            case ImageFormat::RGBA8_SRGB:
+            case ImageFormat::BGRA8_SRGB:
+            case ImageFormat::BC1_RGBA_SRGB:
+            case ImageFormat::BC3_SRGB:
+            case ImageFormat::BC7_SRGB:
+                return true;
+            default:
+                return false;
+        }
     }
 
     /**
