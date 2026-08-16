@@ -167,6 +167,47 @@ namespace dmrender {
                                  uint32_t firstInstance = 0) = 0;
 
         /**
+         * @brief Issues draws whose arguments the GPU reads from a buffer.
+         *
+         * The CPU never sees how many vertices or instances each draw needs — it only says
+         * "execute the commands in this buffer". That is what makes the draw list buildable
+         * without the CPU: today by writing it once and reusing it, later by having a compute
+         * shader cull and fill it.
+         *
+         * @pre A render pass and a pipeline must be active.
+         * @param argumentBuffer A BufferType::Indirect buffer of DrawIndirectCommand structs.
+         * @param drawCount How many commands to execute.
+         * @param offset Byte offset of the first command.
+         * @param stride Bytes between commands; 0 means tightly packed.
+         *
+         * @note Whether the backend can issue all @p drawCount draws in one call depends on the
+         *       hardware. When it cannot, it loops — the result is identical, only the CPU cost
+         *       differs.
+         */
+        virtual void drawIndirect(const std::shared_ptr<GBuffer>& argumentBuffer,
+                                  uint32_t drawCount,
+                                  size_t offset = 0,
+                                  uint32_t stride = 0) = 0;
+
+        /**
+         * @brief The indexed form of drawIndirect().
+         *
+         * @pre A render pass and a pipeline must be active.
+         * @param indexBuffer The index buffer the commands index into.
+         * @param indexType The data type of the indices.
+         * @param argumentBuffer A BufferType::Indirect buffer of DrawIndexedIndirectCommand structs.
+         * @param drawCount How many commands to execute.
+         * @param offset Byte offset of the first command.
+         * @param stride Bytes between commands; 0 means tightly packed.
+         */
+        virtual void drawIndexedIndirect(const std::shared_ptr<GBuffer>& indexBuffer,
+                                         IndexType indexType,
+                                         const std::shared_ptr<GBuffer>& argumentBuffer,
+                                         uint32_t drawCount,
+                                         size_t offset = 0,
+                                         uint32_t stride = 0) = 0;
+
+        /**
         * @brief Ends the current render pass.
         * @pre A render pass must be active.
         */

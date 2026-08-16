@@ -30,8 +30,8 @@ namespace dmrender {
 
     namespace {
         /// @brief Turns a requested level count into a concrete one, expanding kFullMipChain.
-        uint32_t resolveMipLevels(uint32_t requested, uint32_t width, uint32_t height) {
-            const uint32_t largest = std::max(width, height);
+        uint32_t resolveMipLevels(uint32_t requested, uint32_t width, uint32_t height, uint32_t depth) {
+            const uint32_t largest = std::max(std::max(width, height), depth);
             uint32_t maximum = 1;
             while ((largest >> (maximum - 1)) > 1) ++maximum;
 
@@ -52,7 +52,33 @@ namespace dmrender {
             throw std::runtime_error("MetalImage: zero sized image");
         }
 
-        m_mipLevels = resolveMipLevels(desc.mipLevels, desc.width, desc.height);
+        // A cubemap is six layers by definition; anything else takes what it was given.
+        m_arrayLayers = (desc.type == ImageType::CubeMap) ? 6 : std::max(1u, desc.arrayLayers);
+        m_depth = (desc.type == ImageType::Image3D) ? std::max(1u, desc.depth) : 1;
+
+        if (desc.type == ImageType::CubeMap && desc.arrayLayers != 1 && desc.arrayLayers != 6) {
+            throw std::runtime_error("MetalImage: a cubemap has exactly 6 array layers");
+        }
+        if (m_depth > 1 && m_arrayLayers > 1) {
+            throw std::runtime_error("MetalImage: arrays of 3D images are not supported");
+        }
+
+        if (isCompressedFormat(desc.format)) {
+            // Inherent to block compression, not to this wrapper: blocks cannot be written by
+            // the rasteriser, resolved, or downsampled. See the Vulkan backend for the same set.
+            if (hasFlag(desc.usage, ImageUsage::ColorTarget) ||
+                hasFlag(desc.usage, ImageUsage::DepthStencil) ||
+                hasFlag(desc.usage, ImageUsage::Storage)) {
+                throw std::runtime_error(
+                    "MetalImage: a block-compressed image can only be sampled, not rendered "
+                    "into or written by a shader");
+            }
+            if (desc.sampleCount != SampleCount::One) {
+                throw std::runtime_error("MetalImage: a block-compressed image cannot be multisampled");
+            }
+        }
+
+        m_mipLevels = resolveMipLevels(desc.mipLevels, desc.width, desc.height, m_depth);
         m_sampleCount = desc.sampleCount;
 
         const bool multisampled = desc.sampleCount != SampleCount::One;
@@ -72,16 +98,18 @@ namespace dmrender {
         auto mtlDevice = (__bridge id<MTLDevice>)device->nativeHandle();
 
         MTLTextureDescriptor* descriptor = [[MTLTextureDescriptor alloc] init];
-        // A multisample texture is its own texture type in Metal, not a flag on the 2D one.
+        // Both multisampling and array-ness are texture *types* in Metal, not flags on the 2D one.
         descriptor.textureType = multisampled ? MTLTextureType2DMultisample
-                                              : ToMTLTextureType(desc.type);
+                                              : ToMTLTextureType(desc.type, m_arrayLayers);
         descriptor.pixelFormat = ToMTLPixelFormat(desc.format);
         descriptor.width = desc.width;
         descriptor.height = desc.height;
-        descriptor.depth = 1;
+        descriptor.depth = m_depth;
         descriptor.mipmapLevelCount = m_mipLevels;
         descriptor.sampleCount = static_cast<NSUInteger>(desc.sampleCount);
-        descriptor.arrayLength = 1;
+        // Metal counts a cubemap's six faces through the texture type rather than arrayLength,
+        // which stays 1 unless this is an explicit 2D array.
+        descriptor.arrayLength = (desc.type == ImageType::CubeMap) ? 1 : m_arrayLayers;
         descriptor.usage = ToMTLTextureUsage(desc.usage);
         // A render target lives entirely on the GPU; Private is both the fastest option and the
         // only one that allows lossless compression for an attachment. CPU pixels therefore
@@ -100,14 +128,25 @@ namespace dmrender {
         }
 
         if (initialData) {
-            update(initialData,
-                   static_cast<size_t>(desc.width) * desc.height * bytesPerPixel(desc.format),
-                   0);
-            generateMipmaps();
+            // One layer's worth for arrays and cubemaps, the whole volume for a 3D image.
+            update(initialData, levelByteSize(0), 0, 0);
+            // A compressed image's lower levels have to be supplied already compressed.
+            if (!isCompressedFormat(m_format)) {
+                generateMipmaps();
+            }
         }
     }
 
-    void MetalImage::update(const void* data, size_t dataSize, uint32_t mipLevel) {
+    size_t MetalImage::levelByteSize(uint32_t mipLevel) const {
+        // imageLevelBytes rounds up to whole blocks, so a compressed level smaller than 4x4
+        // still costs one block — which is what the driver expects to be handed.
+        return imageLevelBytes(m_format,
+                               std::max(1u, static_cast<uint32_t>(m_texture.width) >> mipLevel),
+                               std::max(1u, static_cast<uint32_t>(m_texture.height) >> mipLevel),
+                               std::max(1u, m_depth >> mipLevel));
+    }
+
+    void MetalImage::update(const void* data, size_t dataSize, uint32_t mipLevel, uint32_t arrayLayer) {
         if (!data || dataSize == 0) return;
         if (!m_device) {
             throw std::runtime_error("GImage::update: a drawable's texture cannot be written from the CPU");
@@ -115,23 +154,32 @@ namespace dmrender {
         if (mipLevel >= m_mipLevels) {
             throw std::runtime_error("GImage::update: mip level is out of range");
         }
+        if (arrayLayer >= m_arrayLayers) {
+            throw std::runtime_error("GImage::update: array layer is out of range");
+        }
 
-        const uint32_t levelWidth = std::max(1u, static_cast<uint32_t>(m_texture.width) >> mipLevel);
-        const uint32_t levelHeight = std::max(1u, static_cast<uint32_t>(m_texture.height) >> mipLevel);
-        const size_t expected = static_cast<size_t>(levelWidth) * levelHeight * bytesPerPixel(m_format);
+        const size_t expected = levelByteSize(mipLevel);
         if (dataSize != expected) {
             throw std::runtime_error(
                 "GImage::update: expected " + std::to_string(expected) + " bytes for mip level " +
                 std::to_string(mipLevel) + " but received " + std::to_string(dataSize));
         }
 
+        const uint32_t levelWidth = std::max(1u, static_cast<uint32_t>(m_texture.width) >> mipLevel);
+        const uint32_t levelHeight = std::max(1u, static_cast<uint32_t>(m_texture.height) >> mipLevel);
+        const uint32_t levelDepth = std::max(1u, m_depth >> mipLevel);
+
         auto* metalDevice = static_cast<MetalDevice*>(m_device);
         metalDevice->uploadToPrivateTexture((__bridge void*)m_texture,
-                                            levelWidth, levelHeight, mipLevel,
-                                            data, dataSize);
+                                            levelWidth, levelHeight, levelDepth,
+                                            mipLevel, arrayLayer,
+                                            data, dataSize,
+                                            rowPitch(m_format, levelWidth),
+                                            dataSize / levelDepth);
     }
 
-    void MetalImage::readback(void* destination, size_t destinationSize, uint32_t mipLevel) {
+    void MetalImage::readback(void* destination, size_t destinationSize,
+                              uint32_t mipLevel, uint32_t arrayLayer) {
         if (!destination || destinationSize == 0) return;
         if (!m_device) {
             throw std::runtime_error("GImage::readback: a drawable's texture cannot be read back");
@@ -147,24 +195,38 @@ namespace dmrender {
         if (mipLevel >= m_mipLevels) {
             throw std::runtime_error("GImage::readback: mip level is out of range");
         }
+        if (arrayLayer >= m_arrayLayers) {
+            throw std::runtime_error("GImage::readback: array layer is out of range");
+        }
 
-        const uint32_t levelWidth = std::max(1u, static_cast<uint32_t>(m_texture.width) >> mipLevel);
-        const uint32_t levelHeight = std::max(1u, static_cast<uint32_t>(m_texture.height) >> mipLevel);
-        const size_t expected = static_cast<size_t>(levelWidth) * levelHeight * bytesPerPixel(m_format);
+        const size_t expected = levelByteSize(mipLevel);
         if (destinationSize != expected) {
             throw std::runtime_error(
                 "GImage::readback: expected " + std::to_string(expected) + " bytes for mip level " +
                 std::to_string(mipLevel) + " but the destination is " + std::to_string(destinationSize));
         }
 
+        const uint32_t levelWidth = std::max(1u, static_cast<uint32_t>(m_texture.width) >> mipLevel);
+        const uint32_t levelHeight = std::max(1u, static_cast<uint32_t>(m_texture.height) >> mipLevel);
+        const uint32_t levelDepth = std::max(1u, m_depth >> mipLevel);
+
         auto* metalDevice = static_cast<MetalDevice*>(m_device);
         metalDevice->readbackFromPrivateTexture((__bridge void*)m_texture,
-                                                levelWidth, levelHeight, mipLevel,
-                                                destination, destinationSize);
+                                                levelWidth, levelHeight, levelDepth,
+                                                mipLevel, arrayLayer,
+                                                destination, destinationSize,
+                                                rowPitch(m_format, levelWidth),
+                                                destinationSize / levelDepth);
     }
 
     void MetalImage::generateMipmaps() {
         if (m_mipLevels <= 1 || !m_device) return;
+        if (isCompressedFormat(m_format)) {
+            // generateMipmapsForTexture: cannot process compressed blocks. See the Vulkan backend.
+            throw std::runtime_error(
+                "GImage::generateMipmaps: a block-compressed image's mip levels must be supplied "
+                "already compressed, one update() per level");
+        }
         auto* metalDevice = static_cast<MetalDevice*>(m_device);
         metalDevice->generateMipmapsForTexture((__bridge void*)m_texture);
     }
@@ -213,6 +275,10 @@ namespace dmrender {
 
     SampleCount MetalImage::sampleCount() const {
         return m_sampleCount;
+    }
+
+    uint32_t MetalImage::arrayLayers() const {
+        return m_arrayLayers;
     }
 
     MemoryLocation MetalImage::memoryLocation() const {

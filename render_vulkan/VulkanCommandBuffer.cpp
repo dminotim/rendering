@@ -194,11 +194,13 @@ namespace dmrender
                 auto* resolveImage = static_cast<VulkanImage*>(resolve.get());
                 colorKey.hasResolve = true;
                 colorKey.resolveRestingLayout = resolveImage->restingLayout();
-                resolveViews.push_back(resolveImage->imageView());
+                resolveViews.push_back(resolveImage->layerView(0));
             }
             key.colors.push_back(colorKey);
 
-            attachmentViews.push_back(image->imageView());
+            // layerView() hands back a view of just the requested layer, which is what makes a
+            // single cubemap face or one shadow cascade slice addressable as a render target.
+            attachmentViews.push_back(image->layerView(color.arrayLayer));
 
             VkClearValue clear{};
             clear.color = { { color.clearValue.color[0], color.clearValue.color[1],
@@ -220,7 +222,7 @@ namespace dmrender
             auto* depthImage = static_cast<VulkanImage*>(depth.image.get());
             key.depth = RenderPassAttachmentKey{
                 ToVkFormat(depthImage->format()), depth.clear, depthImage->restingLayout() };
-            attachmentViews.push_back(depthImage->imageView());
+            attachmentViews.push_back(depthImage->layerView(depth.arrayLayer));
 
             VkClearValue depthClear{};
             depthClear.depthStencil = { depth.clearValue.depth, depth.clearValue.stencil };
@@ -246,11 +248,27 @@ namespace dmrender
 
         // Metal implicitly covers the whole attachment; do the same here now that the pipeline
         // declared viewport and scissor dynamic.
+        //
+        // The height is *negative*, which flips Vulkan's clip space so that +Y points up — the
+        // same direction Metal uses. Without this the two backends disagree about which end of
+        // the screen a given clip-space Y lands on, and any shader or application that computes
+        // a position or a texture coordinate in clip space silently renders mirrored on one of
+        // them. Making the convention identical here is what lets every shader be a literal
+        // translation of its counterpart. See ShaderFunction.hpp for the full convention.
+        //
+        // Three things deliberately do not change:
+        //  - gl_FragCoord still has its origin at the top-left, matching Metal's [[position]],
+        //    so shaders reading it need no adjustment.
+        //  - the scissor rectangle is always in framebuffer coordinates and stays positive.
+        //  - triangle winding now agrees between the backends, because identical clip-space
+        //    input produces identical framebuffer positions, so CullMode means one thing.
+        //
+        // Negative viewport height is core since Vulkan 1.1; this backend requires 1.2.
         VkViewport viewport{};
         viewport.x = 0.0f;
-        viewport.y = 0.0f;
+        viewport.y = static_cast<float>(extent.height);
         viewport.width = static_cast<float>(extent.width);
-        viewport.height = static_cast<float>(extent.height);
+        viewport.height = -static_cast<float>(extent.height);
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
         vkCmdSetViewport(m_data->cmdBuffer, 0, 1, &viewport);
@@ -511,6 +529,75 @@ namespace dmrender
                              vkIndexType);
 
         vkCmdDrawIndexed(m_data->cmdBuffer, indexCount, instanceCount, 0, vertexOffset, firstInstance);
+    }
+
+    void VulkanCommandBuffer::drawIndirect(const std::shared_ptr<GBuffer>& argumentBuffer,
+                                           uint32_t drawCount,
+                                           size_t offset,
+                                           uint32_t stride)
+    {
+        if (!m_data->renderPassActive) throw std::runtime_error("drawIndirect: no active render pass");
+        if (!argumentBuffer || drawCount == 0) return;
+        if (argumentBuffer->type() != BufferType::Indirect) {
+            throw std::runtime_error("drawIndirect: argument buffer must be BufferType::Indirect");
+        }
+
+        flushDescriptorSet();
+
+        auto* arguments = static_cast<VulkanBuffer*>(argumentBuffer.get());
+        const uint32_t effectiveStride =
+            (stride != 0) ? stride : static_cast<uint32_t>(sizeof(DrawIndirectCommand));
+        const VkDeviceSize base = arguments->currentRegionOffset() + offset;
+
+        if (m_data->device->supportsMultiDrawIndirect()) {
+            vkCmdDrawIndirect(m_data->cmdBuffer, arguments->buffer(), base, drawCount, effectiveStride);
+        } else {
+            // Without the feature, drawCount must be 1 per call. The draws issued are the same;
+            // only the number of commands recorded differs.
+            for (uint32_t i = 0; i < drawCount; ++i) {
+                vkCmdDrawIndirect(m_data->cmdBuffer, arguments->buffer(),
+                                  base + static_cast<VkDeviceSize>(i) * effectiveStride,
+                                  1, effectiveStride);
+            }
+        }
+    }
+
+    void VulkanCommandBuffer::drawIndexedIndirect(const std::shared_ptr<GBuffer>& indexBuffer,
+                                                  IndexType indexType,
+                                                  const std::shared_ptr<GBuffer>& argumentBuffer,
+                                                  uint32_t drawCount,
+                                                  size_t offset,
+                                                  uint32_t stride)
+    {
+        if (!m_data->renderPassActive) throw std::runtime_error("drawIndexedIndirect: no active render pass");
+        if (!indexBuffer || !argumentBuffer || drawCount == 0) return;
+        if (argumentBuffer->type() != BufferType::Indirect) {
+            throw std::runtime_error("drawIndexedIndirect: argument buffer must be BufferType::Indirect");
+        }
+
+        flushDescriptorSet();
+
+        auto* vulkanIndexBuffer = static_cast<VulkanBuffer*>(indexBuffer.get());
+        const VkIndexType vkIndexType =
+            (indexType == IndexType::UInt16) ? VK_INDEX_TYPE_UINT16 : VK_INDEX_TYPE_UINT32;
+        vkCmdBindIndexBuffer(m_data->cmdBuffer, vulkanIndexBuffer->buffer(),
+                             vulkanIndexBuffer->currentRegionOffset(), vkIndexType);
+
+        auto* arguments = static_cast<VulkanBuffer*>(argumentBuffer.get());
+        const uint32_t effectiveStride =
+            (stride != 0) ? stride : static_cast<uint32_t>(sizeof(DrawIndexedIndirectCommand));
+        const VkDeviceSize base = arguments->currentRegionOffset() + offset;
+
+        if (m_data->device->supportsMultiDrawIndirect()) {
+            vkCmdDrawIndexedIndirect(m_data->cmdBuffer, arguments->buffer(), base,
+                                     drawCount, effectiveStride);
+        } else {
+            for (uint32_t i = 0; i < drawCount; ++i) {
+                vkCmdDrawIndexedIndirect(m_data->cmdBuffer, arguments->buffer(),
+                                         base + static_cast<VkDeviceSize>(i) * effectiveStride,
+                                         1, effectiveStride);
+            }
+        }
     }
 
     void VulkanCommandBuffer::endRenderPass()

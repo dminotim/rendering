@@ -63,11 +63,17 @@ namespace dmrender {
         ImageType type() const override;
         ImageUsage usage() const override;
         SampleCount sampleCount() const override;
+        uint32_t arrayLayers() const override;
         MemoryLocation memoryLocation() const override;
 
-        void update(const void* data, size_t dataSize, uint32_t mipLevel = 0) override;
+        void update(const void* data, size_t dataSize,
+                    uint32_t mipLevel = 0, uint32_t arrayLayer = 0) override;
         void generateMipmaps() override;
-        void readback(void* destination, size_t destinationSize, uint32_t mipLevel = 0) override;
+        void readback(void* destination, size_t destinationSize,
+                      uint32_t mipLevel = 0, uint32_t arrayLayer = 0) override;
+
+        /// @brief A view of a single array layer, for use as a render pass attachment.
+        VkImageView layerView(uint32_t arrayLayer);
 
         /// @return Pointer to the VkImage handle.
         void* nativeHandle() const override;
@@ -93,6 +99,9 @@ namespace dmrender {
         VkImageLayout restingLayout() const;
 
     private:
+        /// @brief Bytes one update()/readback() call covers for @p mipLevel. See GImage::update().
+        size_t levelByteSize(uint32_t mipLevel) const;
+
         std::unique_ptr<VulkanImageNativeData> m_data;
     };
 

@@ -36,6 +36,17 @@ namespace dmrender {
             case ImageFormat::D24_UNORM_S8_UINT: return VK_FORMAT_D24_UNORM_S8_UINT;
             case ImageFormat::D16_UNORM:         return VK_FORMAT_D16_UNORM;
 
+            // BC is exposed on Vulkan as the BC_* family, gated by the textureCompressionBC
+            // device feature which every desktop GPU supports.
+            case ImageFormat::BC1_RGBA_UNORM:    return VK_FORMAT_BC1_RGBA_UNORM_BLOCK;
+            case ImageFormat::BC1_RGBA_SRGB:     return VK_FORMAT_BC1_RGBA_SRGB_BLOCK;
+            case ImageFormat::BC3_UNORM:         return VK_FORMAT_BC3_UNORM_BLOCK;
+            case ImageFormat::BC3_SRGB:          return VK_FORMAT_BC3_SRGB_BLOCK;
+            case ImageFormat::BC4_UNORM:         return VK_FORMAT_BC4_UNORM_BLOCK;
+            case ImageFormat::BC5_UNORM:         return VK_FORMAT_BC5_UNORM_BLOCK;
+            case ImageFormat::BC7_UNORM:         return VK_FORMAT_BC7_UNORM_BLOCK;
+            case ImageFormat::BC7_SRGB:          return VK_FORMAT_BC7_SRGB_BLOCK;
+
             case ImageFormat::Undefined:
             default:                             return VK_FORMAT_UNDEFINED;
         }
@@ -52,6 +63,15 @@ namespace dmrender {
             case VK_FORMAT_D32_SFLOAT:          return ImageFormat::D32_FLOAT;
             case VK_FORMAT_D24_UNORM_S8_UINT:   return ImageFormat::D24_UNORM_S8_UINT;
             case VK_FORMAT_D16_UNORM:           return ImageFormat::D16_UNORM;
+
+            case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: return ImageFormat::BC1_RGBA_UNORM;
+            case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:  return ImageFormat::BC1_RGBA_SRGB;
+            case VK_FORMAT_BC3_UNORM_BLOCK:      return ImageFormat::BC3_UNORM;
+            case VK_FORMAT_BC3_SRGB_BLOCK:       return ImageFormat::BC3_SRGB;
+            case VK_FORMAT_BC4_UNORM_BLOCK:      return ImageFormat::BC4_UNORM;
+            case VK_FORMAT_BC5_UNORM_BLOCK:      return ImageFormat::BC5_UNORM;
+            case VK_FORMAT_BC7_UNORM_BLOCK:      return ImageFormat::BC7_UNORM;
+            case VK_FORMAT_BC7_SRGB_BLOCK:       return ImageFormat::BC7_SRGB;
 
             default:                            return ImageFormat::Undefined;
         }

@@ -20,7 +20,8 @@ namespace dmrender {
         void setColorAttachment(uint32_t index,
                                 const std::shared_ptr<GImage>& image,
                                 bool clear,
-                                const ClearValue &clearValue) override;
+                                const ClearValue &clearValue,
+                                uint32_t arrayLayer = 0) override;
 
         uint32_t colorAttachmentCount() const override;
 
@@ -31,7 +32,8 @@ namespace dmrender {
                                        bool clearDepth,
                                        float depthValue,
                                        bool clearStencil,
-                                       uint32_t stencilValue) override;
+                                       uint32_t stencilValue,
+                                       uint32_t arrayLayer = 0) override;
 
         void *nativeHandle() override;
 

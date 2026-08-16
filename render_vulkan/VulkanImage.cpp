@@ -1,6 +1,7 @@
 #include "VulkanImage.hpp"
 
 #include <algorithm>
+#include <map>
 #include <stdexcept>
 #include <string>
 
@@ -27,8 +28,12 @@ namespace dmrender {
         uint32_t height = 0;
         ImageUsage usage = ImageUsage::ColorTarget;
         ImageType type = ImageType::Image2D;
+        uint32_t depth = 1;
+        uint32_t arrayLayers = 1;
         uint32_t mipLevels = 1;
         SampleCount sampleCount = SampleCount::One;
+        /// Single-layer views, created on demand so a pass can target one cube face or cascade.
+        std::map<uint32_t, VkImageView> layerViews;
         std::string debugName;
     };
 
@@ -46,9 +51,9 @@ namespace dmrender {
         }
 
         /// @brief Turns a requested level count into a concrete one, expanding kFullMipChain.
-        uint32_t resolveMipLevels(uint32_t requested, uint32_t width, uint32_t height)
+        uint32_t resolveMipLevels(uint32_t requested, uint32_t width, uint32_t height, uint32_t depth)
         {
-            const uint32_t largest = std::max(width, height);
+            const uint32_t largest = std::max(std::max(width, height), depth);
             uint32_t maximum = 1;
             while ((largest >> (maximum - 1)) > 1) ++maximum;
 
@@ -56,14 +61,21 @@ namespace dmrender {
             return std::min(requested, maximum);
         }
 
-        VkImageViewType toVkImageViewType(ImageType type)
+        /// @brief The view type a shader sees: array-ness is part of it, not a separate flag.
+        VkImageViewType toVkImageViewType(ImageType type, uint32_t arrayLayers)
         {
             switch (type) {
-                case ImageType::Image1D: return VK_IMAGE_VIEW_TYPE_1D;
-                case ImageType::Image3D: return VK_IMAGE_VIEW_TYPE_3D;
-                case ImageType::CubeMap: return VK_IMAGE_VIEW_TYPE_CUBE;
+                case ImageType::Image1D:
+                    return arrayLayers > 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D;
+                case ImageType::Image3D:
+                    // A 3D image is never an array; its slices are addressed by the third
+                    // texture coordinate rather than by a layer index.
+                    return VK_IMAGE_VIEW_TYPE_3D;
+                case ImageType::CubeMap:
+                    return VK_IMAGE_VIEW_TYPE_CUBE;
                 case ImageType::Image2D:
-                default:                 return VK_IMAGE_VIEW_TYPE_2D;
+                default:
+                    return arrayLayers > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
             }
         }
 
@@ -111,7 +123,37 @@ namespace dmrender {
         m_data->type = desc.type;
         m_data->debugName = desc.debugName;
         m_data->sampleCount = desc.sampleCount;
-        m_data->mipLevels = resolveMipLevels(desc.mipLevels, desc.width, desc.height);
+
+        // A cubemap is six layers by definition; anything else takes what it was given.
+        m_data->arrayLayers = (desc.type == ImageType::CubeMap) ? 6 : std::max(1u, desc.arrayLayers);
+        m_data->depth = (desc.type == ImageType::Image3D) ? std::max(1u, desc.depth) : 1;
+
+        if (desc.type == ImageType::CubeMap && desc.arrayLayers != 1 && desc.arrayLayers != 6) {
+            throw std::runtime_error("VulkanImage: a cubemap has exactly 6 array layers");
+        }
+        if (m_data->depth > 1 && m_data->arrayLayers > 1) {
+            throw std::runtime_error("VulkanImage: arrays of 3D images are not supported");
+        }
+
+        if (isCompressedFormat(desc.format)) {
+            // All three restrictions are inherent to block compression rather than to this
+            // wrapper: blocks cannot be written by the rasteriser, resolved, or downsampled by a
+            // blit. A compressed texture arrives fully authored, mip chain and all.
+            if (hasFlag(desc.usage, ImageUsage::ColorTarget) ||
+                hasFlag(desc.usage, ImageUsage::DepthStencil) ||
+                hasFlag(desc.usage, ImageUsage::Storage)) {
+                throw std::runtime_error(
+                    "VulkanImage: a block-compressed image can only be sampled, not rendered "
+                    "into or written by a shader");
+            }
+            if (desc.sampleCount != SampleCount::One) {
+                throw std::runtime_error("VulkanImage: a block-compressed image cannot be multisampled");
+            }
+        }
+
+        // Mip chains on a volume shrink in three dimensions, so the largest dimension that
+        // decides the chain length includes depth.
+        m_data->mipLevels = resolveMipLevels(desc.mipLevels, desc.width, desc.height, m_data->depth);
 
         const bool multisampled = desc.sampleCount != SampleCount::One;
         if (multisampled) {
@@ -134,9 +176,9 @@ namespace dmrender {
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageInfo.imageType = toVkImageType(desc.type);
         imageInfo.format = vkFormat;
-        imageInfo.extent = { desc.width, desc.height, 1 };
+        imageInfo.extent = { desc.width, desc.height, m_data->depth };
         imageInfo.mipLevels = m_data->mipLevels;
-        imageInfo.arrayLayers = (desc.type == ImageType::CubeMap) ? 6 : 1;
+        imageInfo.arrayLayers = m_data->arrayLayers;
         imageInfo.samples = ToVkSampleCount(desc.sampleCount);
         imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
         imageInfo.usage = ToVkImageUsage(desc.usage);
@@ -193,7 +235,7 @@ namespace dmrender {
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         viewInfo.image = m_data->image;
-        viewInfo.viewType = toVkImageViewType(desc.type);
+        viewInfo.viewType = toVkImageViewType(desc.type, m_data->arrayLayers);
         viewInfo.format = vkFormat;
         viewInfo.subresourceRange.aspectMask = IsDepthFormat(desc.format)
             ? VK_IMAGE_ASPECT_DEPTH_BIT
@@ -207,12 +249,61 @@ namespace dmrender {
         VkCheck(vkCreateImageView(logicalDevice, &viewInfo, nullptr, &m_data->imageView), "vkCreateImageView");
 
         if (initialData) {
-            update(initialData, static_cast<size_t>(desc.width) * desc.height * bytesPerPixel(desc.format), 0);
-            generateMipmaps();
+            // One layer's worth for arrays and cubemaps, the whole volume for a 3D image.
+            update(initialData, levelByteSize(0), 0, 0);
+            // A compressed image's lower levels have to be supplied already compressed, so only
+            // uncompressed images can have their chain filled in here.
+            if (!isCompressedFormat(m_data->format)) {
+                generateMipmaps();
+            }
         }
     }
 
-    void VulkanImage::update(const void* data, size_t dataSize, uint32_t mipLevel)
+    size_t VulkanImage::levelByteSize(uint32_t mipLevel) const
+    {
+        // imageLevelBytes rounds up to whole blocks, so a compressed level smaller than 4x4
+        // still costs one block — which is what the driver expects to be handed.
+        return imageLevelBytes(m_data->format,
+                               std::max(1u, m_data->width >> mipLevel),
+                               std::max(1u, m_data->height >> mipLevel),
+                               std::max(1u, m_data->depth >> mipLevel));
+    }
+
+    VkImageView VulkanImage::layerView(uint32_t arrayLayer)
+    {
+        // The whole-image view is what shaders sample; a render pass targeting one layer needs a
+        // view of just that layer, since a framebuffer attachment is a view, not an image.
+        if (m_data->arrayLayers <= 1) return m_data->imageView;
+
+        if (auto it = m_data->layerViews.find(arrayLayer); it != m_data->layerViews.end()) {
+            return it->second;
+        }
+        if (arrayLayer >= m_data->arrayLayers) {
+            throw std::runtime_error("VulkanImage: array layer is out of range");
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = m_data->image;
+        // Always 2D: one layer of an array or one face of a cube is a plain 2D render target.
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = ToVkFormat(m_data->format);
+        viewInfo.subresourceRange.aspectMask = IsDepthFormat(m_data->format)
+            ? VK_IMAGE_ASPECT_DEPTH_BIT
+            : VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = 0;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.baseArrayLayer = arrayLayer;
+        viewInfo.subresourceRange.layerCount = 1;
+
+        VkImageView view = VK_NULL_HANDLE;
+        VkCheck(vkCreateImageView(m_data->device->logicalDevice(), &viewInfo, nullptr, &view),
+                "vkCreateImageView (layer)");
+        m_data->layerViews.emplace(arrayLayer, view);
+        return view;
+    }
+
+    void VulkanImage::update(const void* data, size_t dataSize, uint32_t mipLevel, uint32_t arrayLayer)
     {
         if (!data || dataSize == 0) return;
         if (!m_data->owning) {
@@ -221,21 +312,27 @@ namespace dmrender {
         if (mipLevel >= m_data->mipLevels) {
             throw std::runtime_error("GImage::update: mip level is out of range");
         }
+        if (arrayLayer >= m_data->arrayLayers) {
+            throw std::runtime_error("GImage::update: array layer is out of range");
+        }
 
-        const uint32_t levelWidth = std::max(1u, m_data->width >> mipLevel);
-        const uint32_t levelHeight = std::max(1u, m_data->height >> mipLevel);
-        const size_t expected = static_cast<size_t>(levelWidth) * levelHeight * bytesPerPixel(m_data->format);
+        const size_t expected = levelByteSize(mipLevel);
         if (dataSize != expected) {
             throw std::runtime_error(
                 "GImage::update: expected " + std::to_string(expected) + " bytes for mip level " +
                 std::to_string(mipLevel) + " but received " + std::to_string(dataSize));
         }
 
-        m_data->device->uploadToImage(m_data->image, levelWidth, levelHeight, mipLevel,
+        m_data->device->uploadToImage(m_data->image,
+                                      std::max(1u, m_data->width >> mipLevel),
+                                      std::max(1u, m_data->height >> mipLevel),
+                                      std::max(1u, m_data->depth >> mipLevel),
+                                      mipLevel, arrayLayer,
                                       data, dataSize, m_data->restingLayout);
     }
 
-    void VulkanImage::readback(void* destination, size_t destinationSize, uint32_t mipLevel)
+    void VulkanImage::readback(void* destination, size_t destinationSize,
+                               uint32_t mipLevel, uint32_t arrayLayer)
     {
         if (!destination || destinationSize == 0) return;
         if (!m_data->owning) {
@@ -252,26 +349,40 @@ namespace dmrender {
         if (mipLevel >= m_data->mipLevels) {
             throw std::runtime_error("GImage::readback: mip level is out of range");
         }
+        if (arrayLayer >= m_data->arrayLayers) {
+            throw std::runtime_error("GImage::readback: array layer is out of range");
+        }
 
-        const uint32_t levelWidth = std::max(1u, m_data->width >> mipLevel);
-        const uint32_t levelHeight = std::max(1u, m_data->height >> mipLevel);
-        const size_t expected = static_cast<size_t>(levelWidth) * levelHeight * bytesPerPixel(m_data->format);
+        const size_t expected = levelByteSize(mipLevel);
         if (destinationSize != expected) {
             throw std::runtime_error(
                 "GImage::readback: expected " + std::to_string(expected) + " bytes for mip level " +
                 std::to_string(mipLevel) + " but the destination is " + std::to_string(destinationSize));
         }
 
-        m_data->device->readbackFromImage(m_data->image, levelWidth, levelHeight, mipLevel,
+        m_data->device->readbackFromImage(m_data->image,
+                                          std::max(1u, m_data->width >> mipLevel),
+                                          std::max(1u, m_data->height >> mipLevel),
+                                          std::max(1u, m_data->depth >> mipLevel),
+                                          mipLevel, arrayLayer,
                                           destination, destinationSize, m_data->restingLayout);
     }
 
     void VulkanImage::generateMipmaps()
     {
         if (m_data->mipLevels <= 1) return;
+        if (isCompressedFormat(m_data->format)) {
+            // vkCmdBlitImage cannot read or write compressed blocks. Compressing on the GPU is a
+            // whole subsystem; the expectation is that the chain was compressed offline and
+            // uploaded level by level with update().
+            throw std::runtime_error(
+                "GImage::generateMipmaps: a block-compressed image's mip levels must be supplied "
+                "already compressed, one update() per level");
+        }
         m_data->device->generateMipmaps(m_data->image, ToVkFormat(m_data->format),
-                                        m_data->width, m_data->height,
-                                        m_data->mipLevels, m_data->restingLayout);
+                                        m_data->width, m_data->height, m_data->depth,
+                                        m_data->mipLevels, m_data->arrayLayers,
+                                        m_data->restingLayout);
     }
 
     VulkanImage::~VulkanImage()
@@ -282,8 +393,13 @@ namespace dmrender {
         // See VulkanBuffer's destructor: Vulkan will not keep this alive for an in-flight frame.
         vkDeviceWaitIdle(logicalDevice);
 
-        // Framebuffers built from this view must go first — they hold it by handle.
+        // Framebuffers built from any of these views must go first — they hold them by handle.
         m_data->device->invalidateFramebuffersUsing(m_data->imageView);
+        for (auto& [layer, view] : m_data->layerViews) {
+            m_data->device->invalidateFramebuffersUsing(view);
+            vkDestroyImageView(logicalDevice, view, nullptr);
+        }
+        m_data->layerViews.clear();
 
         if (m_data->imageView) vkDestroyImageView(logicalDevice, m_data->imageView, nullptr);
         if (m_data->image) vkDestroyImage(logicalDevice, m_data->image, nullptr);
@@ -292,7 +408,8 @@ namespace dmrender {
 
     uint32_t VulkanImage::width() const { return m_data->width; }
     uint32_t VulkanImage::height() const { return m_data->height; }
-    uint32_t VulkanImage::depth() const { return 1; }
+    uint32_t VulkanImage::depth() const { return m_data->depth; }
+    uint32_t VulkanImage::arrayLayers() const { return m_data->arrayLayers; }
     uint32_t VulkanImage::mipLevels() const { return m_data->mipLevels; }
     ImageFormat VulkanImage::format() const { return m_data->format; }
     ImageType VulkanImage::type() const { return m_data->type; }

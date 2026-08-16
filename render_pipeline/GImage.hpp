@@ -37,8 +37,107 @@ namespace dmrender {
         // Depth/stencil formats
         D32_FLOAT,          ///< 32-bit floating point depth.
         D24_UNORM_S8_UINT,  ///< 24-bit normalized depth, 8-bit unsigned integer stencil.
-        D16_UNORM           ///< 16-bit normalized depth.
+        D16_UNORM,          ///< 16-bit normalized depth.
+
+        // --- Block-compressed formats ---
+        //
+        // These store 4x4 texel blocks in a fixed number of bytes rather than storing each texel,
+        // which is how a real texture set fits in a VRAM budget: BC1 is 8:1 against RGBA8 and
+        // BC3/BC7 are 4:1, and the GPU decompresses while sampling at no cost. The trade is that
+        // they are lossy, cannot be rendered into, and cannot have mip levels generated on the
+        // GPU — a compressed texture arrives with its whole chain already compressed.
+        //
+        // The _SRGB variants are decoded from sRGB to linear on read, which is what colour
+        // (albedo) textures want; data textures such as normal maps use the UNORM variants.
+
+        BC1_RGBA_UNORM,     ///< 4 bits/texel. RGB plus 1-bit alpha. The cheapest colour format.
+        BC1_RGBA_SRGB,      ///< BC1 with sRGB decode.
+        BC3_UNORM,          ///< 8 bits/texel. RGB plus smoothly interpolated alpha.
+        BC3_SRGB,           ///< BC3 with sRGB decode.
+        BC4_UNORM,          ///< 4 bits/texel, single channel. Height and mask maps.
+        BC5_UNORM,          ///< 8 bits/texel, two channels. The standard normal map format.
+        BC7_UNORM,          ///< 8 bits/texel. Highest quality RGBA, slowest to encode.
+        BC7_SRGB            ///< BC7 with sRGB decode.
     };
+
+    /**
+     * @struct FormatInfo
+     * @brief Describes how a format lays out in memory.
+     *
+     * Uncompressed formats have a 1x1 block whose size is the pixel size, so one description
+     * covers both cases and callers need no special path for compression.
+     */
+    struct FormatInfo {
+        uint32_t blockWidth = 1;   ///< Texels per block horizontally.
+        uint32_t blockHeight = 1;  ///< Texels per block vertically.
+        uint32_t blockBytes = 0;   ///< Bytes one block occupies.
+        bool compressed = false;
+    };
+
+    /// @brief Memory layout of @p format. blockBytes is 0 for ImageFormat::Undefined.
+    inline FormatInfo formatInfo(ImageFormat format) {
+        switch (format) {
+            case ImageFormat::RGBA8_UNORM:
+            case ImageFormat::BGRA8_UNORM:
+            case ImageFormat::R32_FLOAT:
+            case ImageFormat::D32_FLOAT:
+            case ImageFormat::D24_UNORM_S8_UINT:
+                return { 1, 1, 4, false };
+            case ImageFormat::RGBA16_FLOAT:
+                return { 1, 1, 8, false };
+            case ImageFormat::D16_UNORM:
+                return { 1, 1, 2, false };
+
+            // 4x4 blocks at 8 bytes: 4 bits per texel.
+            case ImageFormat::BC1_RGBA_UNORM:
+            case ImageFormat::BC1_RGBA_SRGB:
+            case ImageFormat::BC4_UNORM:
+                return { 4, 4, 8, true };
+
+            // 4x4 blocks at 16 bytes: 8 bits per texel.
+            case ImageFormat::BC3_UNORM:
+            case ImageFormat::BC3_SRGB:
+            case ImageFormat::BC5_UNORM:
+            case ImageFormat::BC7_UNORM:
+            case ImageFormat::BC7_SRGB:
+                return { 4, 4, 16, true };
+
+            case ImageFormat::Undefined:
+            default:
+                return { 1, 1, 0, false };
+        }
+    }
+
+    /// @brief True when @p format stores compressed blocks rather than individual texels.
+    inline bool isCompressedFormat(ImageFormat format) {
+        return formatInfo(format).compressed;
+    }
+
+    /**
+     * @brief Bytes one mip level of the given size occupies, tightly packed.
+     *
+     * Rounds up to whole blocks, which is why a 5x5 BC1 level costs the same as an 8x8 one.
+     * This is the size update() and readback() expect, for every format.
+     */
+    /**
+     * @brief Bytes between the starts of two consecutive rows of a tightly packed level.
+     *
+     * For an uncompressed format this is `width * bytesPerPixel`. For a compressed one it is a
+     * row of *blocks*, so it covers four texel rows at once — which is why a naive
+     * `size / height` gives four times the right answer and corrupts the upload.
+     */
+    inline size_t rowPitch(ImageFormat format, uint32_t width) {
+        const FormatInfo info = formatInfo(format);
+        const uint32_t blocksX = (width + info.blockWidth - 1) / info.blockWidth;
+        return static_cast<size_t>(blocksX) * info.blockBytes;
+    }
+
+    inline size_t imageLevelBytes(ImageFormat format, uint32_t width, uint32_t height, uint32_t depth) {
+        const FormatInfo info = formatInfo(format);
+        const uint32_t blocksX = (width + info.blockWidth - 1) / info.blockWidth;
+        const uint32_t blocksY = (height + info.blockHeight - 1) / info.blockHeight;
+        return static_cast<size_t>(blocksX) * blocksY * depth * info.blockBytes;
+    }
 
     /**
      * @struct ClearValue
@@ -91,28 +190,16 @@ namespace dmrender {
     }
 
     /**
-     * @brief Bytes occupied by a single pixel of @p format.
-     * @return 0 for ImageFormat::Undefined.
-     * @note Every format the abstraction exposes is uncompressed and has a whole-byte pixel
-     *       size, so a row pitch is simply width * bytesPerPixel. Adding a block-compressed
-     *       format later would make this function insufficient on its own.
+     * @brief Bytes occupied by a single pixel of an uncompressed @p format.
+     * @return 0 for ImageFormat::Undefined and for any compressed format, which has no
+     *         meaningful per-pixel size.
+     * @note Prefer imageLevelBytes(), which is correct for every format. This remains only for
+     *       code that already knows it is dealing with uncompressed data, such as a screenshot
+     *       writer.
      */
     inline uint32_t bytesPerPixel(ImageFormat format) {
-        switch (format) {
-            case ImageFormat::RGBA8_UNORM:
-            case ImageFormat::BGRA8_UNORM:
-            case ImageFormat::R32_FLOAT:
-            case ImageFormat::D32_FLOAT:
-            case ImageFormat::D24_UNORM_S8_UINT:
-                return 4;
-            case ImageFormat::RGBA16_FLOAT:
-                return 8;
-            case ImageFormat::D16_UNORM:
-                return 2;
-            case ImageFormat::Undefined:
-            default:
-                return 0;
-        }
+        const FormatInfo info = formatInfo(format);
+        return info.compressed ? 0 : info.blockBytes;
     }
 
     /// @brief Passed as ImageDesc::mipLevels to request a full mip chain down to 1x1.
@@ -151,6 +238,26 @@ namespace dmrender {
         ImageFormat format = ImageFormat::Undefined;
         uint32_t width = 1;
         uint32_t height = 1;
+
+        /**
+         * @brief Number of depth slices. Only meaningful for ImageType::Image3D.
+         *
+         * A volume texture — density fields, colour lookup cubes, anything sampled with three
+         * coordinates — is a single image with depth > 1, not a stack of 2D images.
+         */
+        uint32_t depth = 1;
+
+        /**
+         * @brief Number of array layers, for texture arrays and cubemaps.
+         *
+         * Layers are independent images of identical size and format sharing one binding, which
+         * is how shadow cascades and texture atlases avoid a descriptor per slice.
+         * ImageType::CubeMap always has exactly 6, ordered +X, -X, +Y, -Y, +Z, -Z; setting
+         * anything else on a cubemap is an error.
+         *
+         * @note Mutually exclusive with depth > 1: no API here supports arrays of volumes.
+         */
+        uint32_t arrayLayers = 1;
 
         /**
          * @brief Number of mip levels, or kFullMipChain for the complete chain down to 1x1.
@@ -200,21 +307,34 @@ namespace dmrender {
         /// @brief Samples per pixel; SampleCount::One for an ordinary image.
         virtual SampleCount sampleCount() const = 0;
 
+        /// @brief Number of array layers; 6 for a cubemap, 1 for a plain 2D or 3D image.
+        virtual uint32_t arrayLayers() const = 0;
+
         /**
          * @brief Replaces the contents of one mip level from CPU memory.
          *
          * The data must be tightly packed: `width * bytesPerPixel(format())` bytes per row, with
          * dimensions halved (rounding down, minimum 1) for each level below zero.
          *
-         * @param data Tightly packed pixels for the whole level.
-         * @param dataSize Size of @p data in bytes; must match the level exactly.
+         * What one call covers depends on the image:
+         *  - 2D: the whole level, `w * h` pixels.
+         *  - 3D: the whole volume for that level, `w * h * d` pixels, slices back to front.
+         *  - Array or cubemap: one layer of that level, `w * h` pixels. Call once per layer.
+         *
+         * @param data Tightly packed pixels.
+         * @param dataSize Size of @p data in bytes; must match the above exactly.
          * @param mipLevel Which level to replace.
+         * @param arrayLayer Which layer to replace. Ignored for 2D and 3D images. For a cubemap
+         *                   the faces are ordered +X, -X, +Y, -Y, +Z, -Z.
          *
          * @note Uploading level 0 does *not* refresh the other levels. Call
          *       generateMipmaps() afterwards if the image has a chain.
          * @note Synchronous: the upload is submitted and waited on before returning.
          */
-        virtual void update(const void* data, size_t dataSize, uint32_t mipLevel = 0) = 0;
+        virtual void update(const void* data,
+                            size_t dataSize,
+                            uint32_t mipLevel = 0,
+                            uint32_t arrayLayer = 0) = 0;
 
         /**
          * @brief Fills levels 1..mipLevels()-1 by successively downsampling level 0 on the GPU.
@@ -231,8 +351,10 @@ namespace dmrender {
          * rendered output against a reference in a test.
          *
          * @param destination Buffer to fill; receives tightly packed pixels.
-         * @param destinationSize Size of @p destination in bytes; must match the level exactly.
+         * @param destinationSize Size of @p destination in bytes; must match the level exactly,
+         *                        following the same rules as update().
          * @param mipLevel Which level to read.
+         * @param arrayLayer Which layer to read. Ignored for 2D and 3D images.
          *
          * @pre The image must have been created with ImageUsage::TransferSrc.
          *
@@ -242,7 +364,10 @@ namespace dmrender {
          * @note A multisample image cannot be read back. Resolve it first and read the resolve
          *       target.
          */
-        virtual void readback(void* destination, size_t destinationSize, uint32_t mipLevel = 0) = 0;
+        virtual void readback(void* destination,
+                              size_t destinationSize,
+                              uint32_t mipLevel = 0,
+                              uint32_t arrayLayer = 0) = 0;
 
         /**
          * @brief Reports where this image's memory actually landed.
