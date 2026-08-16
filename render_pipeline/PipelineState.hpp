@@ -5,9 +5,98 @@
 #ifndef RENDERING_PIPELINESTATE_HPP
 #define RENDERING_PIPELINESTATE_HPP
 
+#include <array>
 #include <cstdint>
 
 namespace dmrender {
+
+    /**
+     * @brief How many buffer binding slots a pipeline exposes.
+     *
+     * Slot number equals binding number in GLSL and buffer index in MSL, so a buffer bound to
+     * slot 3 is `layout(set = 0, binding = 3)` and `[[buffer(3)]]` respectively. Slot
+     * kPushConstantBufferSlot is reserved on Metal for push constant data, which is why the range
+     * stops at 8 rather than at the hardware limit.
+     */
+    inline constexpr uint32_t kMaxBufferSlots = 8;
+
+    /**
+     * @brief How many texture binding slots a pipeline exposes.
+     *
+     * A separate numbering space from buffer slots: `setTexture(0, …)` and
+     * `setUniformBuffer(0, …)` are different bindings, matching Metal's unrelated
+     * `[[texture(n)]]` and `[[buffer(n)]]` indices.
+     */
+    inline constexpr uint32_t kMaxTextureSlots = 8;
+
+    /**
+     * @enum BufferBindingType
+     * @brief Which kind of buffer binding a slot carries.
+     *
+     * The distinction is invisible in MSL — both are just a buffer at some index, differing only
+     * in address space — but it is baked into the pipeline on Vulkan, where a descriptor's type is
+     * fixed by the layout the pipeline was created with. That is why it has to be declared rather
+     * than inferred at draw time: by the time a draw call knows what is bound, the layout has
+     * already been chosen.
+     */
+    enum class BufferBindingType {
+        /**
+         * @brief A uniform block: small, read-only, and read at the same address by every thread.
+         *
+         * The hardware can cache it aggressively on that assumption, which makes it the faster
+         * choice for per-pass or per-draw constants. The cost is a tight size limit — the portable
+         * floor is 16 KiB — so it cannot hold a large array.
+         *
+         * GLSL: `layout(std140, set = 0, binding = n) uniform Block { … }`
+         * MSL:  `constant Block& name [[buffer(n)]]`
+         */
+        Uniform,
+
+        /**
+         * @brief A storage buffer: large, indexed per thread.
+         *
+         * The right home for anything addressed by an index that varies across threads — vertices
+         * by vertex id, instance transforms by instance id, bone matrices, material tables. The
+         * size limit is measured in gigabytes rather than kilobytes.
+         *
+         * GLSL: `layout(std430, set = 0, binding = n) readonly buffer Block { T items[]; }`
+         * MSL:  `const device T* name [[buffer(n)]]`
+         */
+        Storage
+    };
+
+    /// @brief The binding type of every buffer slot a pipeline exposes.
+    using BufferSlotLayout = std::array<BufferBindingType, kMaxBufferSlots>;
+
+    /**
+     * @brief The historical layout: slot 0 a storage buffer, slots 1..7 uniform blocks.
+     *
+     * Slot 0 is where geometry has always been read from — this abstraction pulls vertices out of
+     * a buffer by vertex id rather than through a vertex attribute description — so it stays a
+     * storage buffer by default and every existing shader keeps working untouched.
+     */
+    inline constexpr BufferSlotLayout defaultBufferSlotLayout()
+    {
+        return { BufferBindingType::Storage, BufferBindingType::Uniform,
+                 BufferBindingType::Uniform, BufferBindingType::Uniform,
+                 BufferBindingType::Uniform, BufferBindingType::Uniform,
+                 BufferBindingType::Uniform, BufferBindingType::Uniform };
+    }
+
+    /**
+     * @brief A compact identity for a slot layout: bit @c i set means slot @c i is Storage.
+     *
+     * Used as a cache key, so that the handful of distinct layouts an application actually uses
+     * are each built once rather than per pipeline.
+     */
+    inline constexpr uint32_t bufferSlotLayoutMask(const BufferSlotLayout& layout)
+    {
+        uint32_t mask = 0;
+        for (uint32_t slot = 0; slot < kMaxBufferSlots; ++slot) {
+            if (layout[slot] == BufferBindingType::Storage) mask |= (1u << slot);
+        }
+        return mask;
+    }
 
     /**
      * @enum CompareOp

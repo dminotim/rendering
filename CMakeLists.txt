@@ -93,6 +93,11 @@ set(ALL_SOURCE_FILES
         # Model loading (application-level: the abstraction knows nothing about file formats)
         mesh/Mesh.hpp
         mesh/Mesh.cpp
+        mesh/SceneCache.cpp
+
+        # Texture loading and sharing
+        texture/TextureCache.hpp
+        texture/TextureCache.cpp
 
         # ImGui core and common backend files
         external/imgui/imgui.cpp
@@ -150,25 +155,37 @@ if(WIN32)
     # file — PlaneShader.metal holds both plane_fragment_shader and plane_fragment_shader_mrt —
     # and the artifact must be named after the file the application asks for, not after the GLSL
     # source it happened to be compiled from.
+    # source file | logical function name | stem of the .metal file | extra glslc flags
+    #
+    # Mesh.frag is compiled twice from one source: the masked variant differs only by an alpha
+    # test, and keeping two near-identical files in sync by hand is exactly the kind of thing
+    # that quietly diverges.
     set(GLSL_SHADERS
-            "Mesh.vert:mesh_vertex_shader:Mesh"
-            "Mesh.frag:mesh_fragment_shader:Mesh"
+            "Mesh.vert|mesh_vertex_shader|Mesh|"
+            "Mesh.frag|mesh_fragment_shader|Mesh|"
+            "Mesh.frag|mesh_fragment_masked|Mesh|-DALPHA_TEST=1"
+            "MeshShadow.vert|shadow_vertex_shader|MeshShadow|"
+            "MeshShadow.frag|shadow_fragment_shader|MeshShadow|"
+            "MeshShadow.frag|shadow_fragment_masked|MeshShadow|-DALPHA_TEST=1"
     )
 
     set(SPIRV_OUTPUTS "")
     foreach(_shader_entry ${GLSL_SHADERS})
-        string(REPLACE ":" ";" _parts "${_shader_entry}")
+        string(REPLACE "|" ";" _parts "${_shader_entry}")
         list(GET _parts 0 _shader_file)
         list(GET _parts 1 _function_name)
         list(GET _parts 2 _shader_stem)
+        list(GET _parts 3 _extra_flags)
 
         set(_shader_src "${CMAKE_SOURCE_DIR}/shaders/glsl/${_shader_file}")
         set(_spirv_out "${SHADER_DIR}/${_shader_stem}.${_function_name}.spv")
 
+        separate_arguments(_flag_list UNIX_COMMAND "${_extra_flags}")
+
         add_custom_command(
                 OUTPUT "${_spirv_out}"
                 COMMAND ${CMAKE_COMMAND} -E make_directory "${SHADER_DIR}"
-                COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2 -o "${_spirv_out}" "${_shader_src}"
+                COMMAND "${GLSLC_EXECUTABLE}" --target-env=vulkan1.2 ${_flag_list} -o "${_spirv_out}" "${_shader_src}"
                 DEPENDS "${_shader_src}"
                 COMMENT "Compiling ${_shader_file} -> ${_shader_stem}.${_function_name}.spv"
                 VERBATIM
@@ -183,6 +200,8 @@ if(WIN32)
     set(GLSL_SOURCE_FILES
             shaders/glsl/Mesh.vert
             shaders/glsl/Mesh.frag
+            shaders/glsl/MeshShadow.vert
+            shaders/glsl/MeshShadow.frag
     )
     target_sources(${APP_NAME} PRIVATE ${GLSL_SOURCE_FILES})
     set_source_files_properties(${GLSL_SOURCE_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
@@ -199,6 +218,7 @@ target_include_directories(${APP_NAME} PRIVATE
         external/tinyobjloader     # OBJ + MTL, including texture references
         external/happly            # PLY, binary and ASCII
         external/microstl          # STL, binary and ASCII
+        external/stb               # stb_image: PNG/JPG/TGA decoding (public domain)
 
         # Project-specific headers
         . # Include the root project directory for FastRenderer.hpp etc.

@@ -17,78 +17,135 @@ namespace dmrender {
      * @struct MeshVertex
      * @brief One vertex in the canonical layout every loaded model is converted to.
      *
-     * The renderer reads geometry out of a storage buffer indexed by vertex id rather than
-     * through a vertex attribute description, so the layout lives in the shader and every model
-     * must arrive in this exact shape. That is the trade the abstraction makes: no per-asset
-     * vertex formats, but also no vertex layout plumbing.
+     * 24 bytes. Geometry is read out of a storage buffer indexed by vertex id rather than through
+     * a vertex attribute description, so the layout lives in the shader and every model must
+     * arrive in this exact shape.
      *
-     * @note 48 bytes, and every member is 16-byte aligned on purpose. A `vec3` inside a storage
-     *       buffer array has a 16-byte stride in shader memory layout rules, so padding here is
-     *       not waste — it is what makes the C++ struct and the shader struct agree byte for
-     *       byte. Getting this wrong produces geometry that looks sheared or exploded.
+     * @note Every member is a four-byte scalar on purpose. A `vec3` inside a storage buffer array
+     *       has 16-byte alignment, which is why the previous layout needed padding to 48 bytes;
+     *       a struct of scalars aligns to 4 and therefore packs tightly. On a ten-million-triangle
+     *       scene that difference is a couple of hundred megabytes.
      */
     struct MeshVertex {
-        float position[3];
-        float pad0 = 0.0f;
-        float normal[3];
-        float pad1 = 0.0f;
-        float uv[2];
-        float pad2[2] = { 0.0f, 0.0f };
+        float    position[3];   ///< Full precision: positions are what depth precision rests on.
+        /**
+         * @brief Normal, octahedron-mapped into two signed 16-bit values.
+         *
+         * Roughly 0.1 degrees of error — far below what shading can show. Decoded in the shader
+         * with `unpackSnorm2x16` (GLSL) or `as_type<short2>` (MSL).
+         */
+        uint32_t packedNormal;
+        /**
+         * @brief Texture coordinate, full precision.
+         *
+         * Deliberately not half-float. Scenes in the archive tile textures with coordinates in
+         * the tens, and at that magnitude a half has a step of about 0.03 of a texture — visible
+         * swimming on floors and walls.
+         */
+        float    uv[2];
     };
-    static_assert(sizeof(MeshVertex) == 48, "MeshVertex must match the shader's array stride");
+    static_assert(sizeof(MeshVertex) == 24, "MeshVertex must match the shader's array stride");
+
+    /// @brief Packs a unit normal into two signed 16-bit values via the octahedron mapping.
+    uint32_t packNormal(float x, float y, float z);
+
+    /**
+     * @enum MaterialBlendMode
+     * @brief How a material's coverage is resolved, which decides when it is drawn.
+     *
+     * The distinction matters more than it looks. Cutout is *not* transparency: coverage is
+     * binary, so the depth buffer handles it and no sorting is needed. Only Transparent needs
+     * back-to-front ordering.
+     */
+    enum class MaterialBlendMode {
+        Opaque,       ///< Fully covers. Drawn first, sorted front-to-back for early-Z.
+        Cutout,       ///< Binary coverage via discard. Drawn with the opaque set.
+        Transparent   ///< Real blending. Drawn last, back-to-front, without depth writes.
+    };
 
     /**
      * @struct MeshMaterial
-     * @brief The subset of a material this viewer understands.
+     * @brief The subset of a material this renderer understands.
      *
-     * Formats carry far more than this — specular exponents, emission, illumination models —
-     * but a viewer that renders a base colour and one texture needs only these. Fields are
-     * populated when the format supplies them and left at their defaults otherwise.
+     * Formats carry far more than this. These are the fields that change what appears on screen
+     * for the scenes in the archive, which are authored in classic Phong MTL rather than in any
+     * physically based workflow — so several values here are derived rather than read.
      */
     struct MeshMaterial {
         std::string name;
+
         float baseColor[3] = { 0.8f, 0.8f, 0.8f };
-        /// Path to the albedo texture, resolved relative to the model file. Empty if none.
-        std::filesystem::path albedoTexture;
+        float emissive[3]  = { 0.0f, 0.0f, 0.0f };
+        float opacity      = 1.0f;   ///< MTL `d`. Below 1 means real transparency.
+        float roughness    = 0.5f;   ///< Derived from `Ns`; see Mesh.cpp for the conversion.
+        float metallic     = 0.0f;   ///< MTL has no such concept; heuristically derived from `Ks`.
+
+        std::filesystem::path albedoTexture;    ///< map_Kd. Colour — needs sRGB decoding.
+        std::filesystem::path alphaTexture;     ///< map_d. Data — never sRGB.
+        std::filesystem::path normalTexture;    ///< map_bump / bump. Data — never sRGB.
+
+        MaterialBlendMode blendMode = MaterialBlendMode::Opaque;
+
+        /**
+         * @brief Whether back faces should be kept.
+         *
+         * The archive is full of foliage and cloth modelled as single-sided planes meant to be
+         * seen from both directions. MTL has no flag for it, so this is a heuristic: anything
+         * with an alpha mask is treated as two-sided, which covers exactly those cases.
+         */
+        bool twoSided = false;
     };
 
     /**
      * @struct MeshSubset
      * @brief A contiguous run of indices sharing one material.
      *
-     * A model with several materials becomes several subsets over one shared vertex and index
-     * buffer, so switching material costs a pipeline-state change rather than a buffer rebind.
+     * Carries its own bounds because culling at whole-model granularity achieves nothing — a
+     * courtyard is always partly in view. Per-subset bounds are the coarsest granularity at which
+     * frustum culling starts to pay.
      */
     struct MeshSubset {
         uint32_t firstIndex = 0;
         uint32_t indexCount = 0;
-        int32_t materialIndex = -1;   ///< Index into Mesh::materials, or -1 for the default.
+        int32_t  materialIndex = -1;   ///< Index into Mesh::materials, or -1 for the default.
+
+        float boundsMin[3] = {  1e30f,  1e30f,  1e30f };
+        float boundsMax[3] = { -1e30f, -1e30f, -1e30f };
+
+        std::array<float, 3> center() const {
+            return { (boundsMin[0] + boundsMax[0]) * 0.5f,
+                     (boundsMin[1] + boundsMax[1]) * 0.5f,
+                     (boundsMin[2] + boundsMax[2]) * 0.5f };
+        }
+        /// @brief Radius of a sphere enclosing the bounds.
+        float radius() const;
     };
 
     /**
      * @struct Mesh
-     * @brief A loaded model, already in the form the renderer wants.
+     * @brief A loaded scene, already in the form the renderer wants.
      *
      * Loading normalises everything: triangulated, indexed, with normals present whether or not
-     * the file had them, and with bounds precomputed so a camera can frame the model without a
-     * second pass over the data.
+     * the file had them, with bounds precomputed per subset, and with materials classified by
+     * blend mode.
      */
     struct Mesh {
-        std::vector<MeshVertex> vertices;
-        std::vector<uint32_t> indices;
-        std::vector<MeshSubset> subsets;
+        std::vector<MeshVertex>   vertices;
+        std::vector<uint32_t>     indices;
+        std::vector<MeshSubset>   subsets;
         std::vector<MeshMaterial> materials;
 
-        /// Axis-aligned bounds of the geometry.
-        std::array<float, 3> boundsMin = { 0.0f, 0.0f, 0.0f };
-        std::array<float, 3> boundsMax = { 0.0f, 0.0f, 0.0f };
+        float boundsMin[3] = {  1e30f,  1e30f,  1e30f };
+        float boundsMax[3] = { -1e30f, -1e30f, -1e30f };
 
-        /// True when the file supplied normals; false when they were generated on load.
-        bool hadNormals = false;
-        /// True when the file supplied texture coordinates.
+        bool hadNormals   = false;
         bool hadTexCoords = false;
+        std::string sourceFormat;
 
-        std::string sourceFormat;   ///< "OBJ", "STL" or "PLY", for reporting.
+        /// @brief Directory the model was loaded from; texture paths resolve against it.
+        std::filesystem::path baseDirectory;
+
+        bool empty() const { return vertices.empty() || indices.empty(); }
 
         std::array<float, 3> center() const {
             return { (boundsMin[0] + boundsMax[0]) * 0.5f,
@@ -96,32 +153,44 @@ namespace dmrender {
                      (boundsMin[2] + boundsMax[2]) * 0.5f };
         }
 
-        /// @brief Longest edge of the bounding box; 0 for an empty mesh.
-        float boundsExtent() const {
-            const float dx = boundsMax[0] - boundsMin[0];
-            const float dy = boundsMax[1] - boundsMin[1];
-            const float dz = boundsMax[2] - boundsMin[2];
-            return dx > dy ? (dx > dz ? dx : dz) : (dy > dz ? dy : dz);
-        }
+        /// @brief Longest side of the bounding box. Used to scale camera speed and clip planes.
+        float boundsExtent() const;
 
-        bool empty() const { return vertices.empty() || indices.empty(); }
+        /// @brief Bytes the geometry occupies, for the memory report.
+        size_t geometryBytes() const {
+            return vertices.size() * sizeof(MeshVertex) + indices.size() * sizeof(uint32_t);
+        }
     };
 
     /**
-     * @brief Loads a model, choosing the reader by file extension.
-     *
-     * Supported: `.obj` (with materials and texture references), `.stl` (binary and ASCII),
-     * `.ply` (binary and ASCII).
-     *
-     * Whatever the format, the result is triangulated, indexed and carries normals. Files
-     * without normals get smooth ones generated; files without texture coordinates get zeroes,
-     * which is harmless because a model with no texture is not sampled anyway.
-     *
-     * @param path Path to the model file.
-     * @param error Receives a human-readable description if loading fails.
-     * @return The loaded mesh, or an empty mesh on failure.
+     * @brief Loads a model, dispatching on file extension.
+     * @param path The .obj, .stl or .ply file.
+     * @param[out] error Human-readable reason on failure.
+     * @return The loaded mesh, or an empty one on failure.
      */
     Mesh loadMesh(const std::filesystem::path& path, std::string& error);
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Binary cache
+    //
+    // Parsing a gigabyte of text OBJ takes tens of seconds, and half of that is deduplicating
+    // vertices. Doing it once and saving the result turns every subsequent start into a handful
+    // of large reads.
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /// @brief The cache file that belongs to @p modelPath.
+    std::filesystem::path sceneCachePath(const std::filesystem::path& modelPath);
+
+    /**
+     * @brief Loads a cached scene if one exists and is still valid for @p modelPath.
+     *
+     * Validity means the magic and version match, and the source file's size and modification
+     * time are unchanged. Anything else is treated as a miss rather than an error.
+     */
+    bool loadSceneCache(const std::filesystem::path& modelPath, Mesh& mesh);
+
+    /// @brief Writes @p mesh to the cache file for @p modelPath. Failure is not fatal.
+    bool saveSceneCache(const std::filesystem::path& modelPath, const Mesh& mesh);
 
 } // namespace dmrender
 

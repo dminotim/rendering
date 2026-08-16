@@ -1,5 +1,6 @@
 #include "VulkanBuffer.hpp"
 
+#include <algorithm>
 #include <cstring>
 #include <stdexcept>
 
@@ -21,6 +22,7 @@ namespace dmrender {
         VkDeviceSize regionStride = 0;  ///< Distance between two per-frame regions.
         uint32_t regionCount = 1;
         MemoryLocation location = MemoryLocation::HostVisible;
+        VkBufferUsageFlags usageFlags = 0;  ///< What roles this allocation can serve.
         /**
          * Which region currently holds the newest complete contents.
          *
@@ -45,7 +47,12 @@ namespace dmrender {
                 case BufferType::Index:
                     return VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
                 case BufferType::Uniform:
-                    return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+                    // STORAGE as well: a pipeline may declare the slot this buffer is bound to as
+                    // BufferBindingType::Storage, and the same allocation has to serve either
+                    // role. The bit is free when unused.
+                    return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+                case BufferType::Storage:
+                    return VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
                 case BufferType::Indirect:
                     // STORAGE_BUFFER as well, so a compute shader could later fill the draw list
                     // in place without the buffer needing to be recreated.
@@ -91,8 +98,15 @@ namespace dmrender {
 
         const VkPhysicalDeviceLimits& limits = device->properties().limits;
         VkDeviceSize alignment = 16;
-        if (type == BufferType::Uniform) alignment = limits.minUniformBufferOffsetAlignment;
-        if (type == BufferType::Vertex)  alignment = limits.minStorageBufferOffsetAlignment;
+        // A uniform buffer may be bound to a slot the pipeline declares as storage, so its regions
+        // have to satisfy whichever alignment is stricter.
+        if (type == BufferType::Uniform) {
+            alignment = std::max(limits.minUniformBufferOffsetAlignment,
+                                 limits.minStorageBufferOffsetAlignment);
+        }
+        if (type == BufferType::Vertex || type == BufferType::Storage) {
+            alignment = limits.minStorageBufferOffsetAlignment;
+        }
         m_data->regionStride = alignUp(static_cast<VkDeviceSize>(size), alignment);
 
         const VkDeviceSize totalSize = m_data->regionStride * m_data->regionCount;
@@ -120,6 +134,7 @@ namespace dmrender {
             bufferInfo.usage |= VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         }
         bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        m_data->usageFlags = bufferInfo.usage;
 
         VkDevice logicalDevice = device->logicalDevice();
         VkCheck(vkCreateBuffer(logicalDevice, &bufferInfo, nullptr, &m_data->buffer), "vkCreateBuffer");
@@ -182,6 +197,8 @@ namespace dmrender {
     BufferType VulkanBuffer::type() const { return m_data->type; }
     BufferUsage VulkanBuffer::usage() const { return m_data->usage; }
     size_t VulkanBuffer::size() const { return m_data->size; }
+
+    VkBufferUsageFlags VulkanBuffer::usageFlags() const { return m_data->usageFlags; }
     MemoryLocation VulkanBuffer::memoryLocation() const { return m_data->location; }
 
     void VulkanBuffer::update(const void* data, size_t dataSize, size_t offset)

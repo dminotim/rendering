@@ -22,6 +22,19 @@ namespace dmrender {
         Uniform, ///< The buffer will store uniform data (constants).
 
         /**
+         * @brief The buffer holds an array the shader indexes per thread.
+         *
+         * Instance transforms read by instance id, bone matrices, a material table — anything
+         * addressed by a value that differs between threads, and anything too large for a uniform
+         * block, whose portable ceiling is 16 KiB.
+         *
+         * Bind it with CommandBuffer::setStorageBuffer() to a slot the pipeline declares as
+         * BufferBindingType::Storage. A BufferType::Uniform buffer can serve the same role, so
+         * this type exists mainly to say what the data is at the point of creation.
+         */
+        Storage,
+
+        /**
          * @brief The buffer will hold draw arguments read by the GPU.
          *
          * Used with CommandBuffer::drawIndirect() and drawIndexedIndirect(). Filling it from the

@@ -7,6 +7,8 @@
 #include <stdexcept>
 #include <optional>
 #include <tuple>
+#include <vector>
+#include "Commandbuffer.hpp"   // kMaxPushConstantBytes
 #include <render_vulkan/VulkanBuffer.hpp>
 #include <render_vulkan/VulkanImage.hpp>
 #include <render_vulkan/VulkanSampler.hpp>
@@ -26,6 +28,7 @@ namespace dmrender {
         bool memoryBudgetExtension = false;
         bool textureCompressionBC = false;
         bool multiDrawIndirect = false;
+        uint32_t maxAnisotropy = 1;
         std::unique_ptr<VulkanMemoryAllocator> allocator;
 
         // --- Transfer context: everything needed to push data into device-local memory ---
@@ -42,6 +45,8 @@ namespace dmrender {
         std::map<RenderPassKey, VkRenderPass> renderPasses;
         /// @brief Framebuffers, keyed by the render pass and the exact set of views they wrap.
         std::map<std::pair<VkRenderPass, std::vector<VkImageView>>, VkFramebuffer> framebuffers;
+        /// Keyed on bufferSlotLayoutMask(): which of the eight buffer slots are storage buffers.
+        std::map<uint32_t, VulkanDevice::PipelineLayoutSet> pipelineLayouts;
         uint32_t currentFrameSlot = 0;
     };
 
@@ -265,6 +270,12 @@ namespace dmrender {
             vkDestroyRenderPass(m_data->device, renderPass, nullptr);
         }
         m_data->renderPasses.clear();
+        for (auto& [key, layouts] : m_data->pipelineLayouts) {
+            vkDestroyPipelineLayout(m_data->device, layouts.pipelineLayout, nullptr);
+            vkDestroyDescriptorSetLayout(m_data->device, layouts.bufferSet, nullptr);
+            vkDestroyDescriptorSetLayout(m_data->device, layouts.textureSet, nullptr);
+        }
+        m_data->pipelineLayouts.clear();
         vkDestroyDevice(m_data->device, nullptr);
         m_data->device = VK_NULL_HANDLE;
     }
@@ -322,6 +333,87 @@ namespace dmrender {
     void VulkanDevice::setCurrentFrameSlot(uint32_t slot)
     {
         m_data->currentFrameSlot = slot;
+    }
+
+    const VulkanDevice::PipelineLayoutSet&
+    VulkanDevice::acquirePipelineLayout(const BufferSlotLayout& slots)
+    {
+        const uint32_t mask = bufferSlotLayoutMask(slots);
+        if (auto it = m_data->pipelineLayouts.find(mask); it != m_data->pipelineLayouts.end()) {
+            return it->second;
+        }
+
+        PipelineLayoutSet layouts{};
+
+        // --- Descriptor set 0: buffers. Slot number == binding number. ---
+        // Every slot is declared whether or not a shader uses it: an unused binding in a bound set
+        // costs nothing, and declaring the full range means any shader compiles against this
+        // layout as long as the types line up.
+        std::vector<VkDescriptorSetLayoutBinding> bufferBindings;
+        bufferBindings.reserve(kMaxBindingSlots);
+        for (uint32_t slot = 0; slot < kMaxBindingSlots; ++slot) {
+            VkDescriptorSetLayoutBinding binding{};
+            binding.binding = slot;
+            binding.descriptorType = slots[slot] == BufferBindingType::Storage
+                ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+                : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            binding.descriptorCount = 1;
+            // Both stages, always. Metal binds per stage and the abstraction asks callers to do
+            // the same, but on Vulkan one descriptor covers both, so the second call is a no-op
+            // rather than a second binding.
+            binding.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            bufferBindings.push_back(binding);
+        }
+
+        VkDescriptorSetLayoutCreateInfo bufferLayoutInfo{};
+        bufferLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        bufferLayoutInfo.bindingCount = static_cast<uint32_t>(bufferBindings.size());
+        bufferLayoutInfo.pBindings = bufferBindings.data();
+        VkCheck(vkCreateDescriptorSetLayout(m_data->device, &bufferLayoutInfo, nullptr,
+                                            &layouts.bufferSet),
+                "vkCreateDescriptorSetLayout (buffers)");
+
+        // --- Descriptor set 1: textures, again slot number == binding number. ---
+        std::vector<VkDescriptorSetLayoutBinding> textureBindings;
+        textureBindings.reserve(kMaxTextureSlots);
+        for (uint32_t slot = 0; slot < kMaxTextureSlots; ++slot) {
+            VkDescriptorSetLayoutBinding texture{};
+            texture.binding = slot;
+            texture.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            texture.descriptorCount = 1;
+            texture.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            textureBindings.push_back(texture);
+        }
+
+        VkDescriptorSetLayoutCreateInfo textureLayoutInfo{};
+        textureLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        textureLayoutInfo.bindingCount = static_cast<uint32_t>(textureBindings.size());
+        textureLayoutInfo.pBindings = textureBindings.data();
+        VkCheck(vkCreateDescriptorSetLayout(m_data->device, &textureLayoutInfo, nullptr,
+                                            &layouts.textureSet),
+                "vkCreateDescriptorSetLayout (textures)");
+
+        const VkDescriptorSetLayout setLayouts[] = { layouts.bufferSet, layouts.textureSet };
+
+        // One range covering both stages, always declared. A shader that ignores push constants
+        // costs nothing for the range existing, and declaring it unconditionally means any
+        // pipeline can accept setPushConstants() without the caller checking first.
+        VkPushConstantRange pushConstantRange{};
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = static_cast<uint32_t>(kMaxPushConstantBytes);
+
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(std::size(setLayouts));
+        pipelineLayoutInfo.pSetLayouts = setLayouts;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+        VkCheck(vkCreatePipelineLayout(m_data->device, &pipelineLayoutInfo, nullptr,
+                                       &layouts.pipelineLayout),
+                "vkCreatePipelineLayout");
+
+        return m_data->pipelineLayouts.emplace(mask, layouts).first->second;
     }
 
     VkRenderPass VulkanDevice::acquireRenderPass(const RenderPassKey& key)
@@ -632,6 +724,11 @@ namespace dmrender {
         if (supported & VK_SAMPLE_COUNT_4_BIT)  return SampleCount::Four;
         if (supported & VK_SAMPLE_COUNT_2_BIT)  return SampleCount::Two;
         return SampleCount::One;
+    }
+
+    uint32_t VulkanDevice::maxSupportedAnisotropy() const
+    {
+        return m_data->maxAnisotropy;
     }
 
     uint32_t VulkanDevice::selectMemoryType(uint32_t typeBits,
@@ -1061,9 +1158,17 @@ namespace dmrender {
         deviceFeatures.multiDrawIndirect = supportedFeatures.multiDrawIndirect;
         // Allows a non-zero firstInstance in indirect draw arguments.
         deviceFeatures.drawIndirectFirstInstance = supportedFeatures.drawIndirectFirstInstance;
+        // Anisotropic filtering. Ubiquitous on desktop, but still a feature that has to be asked
+        // for: creating a sampler with anisotropyEnable set without it is undefined behaviour.
+        deviceFeatures.samplerAnisotropy = supportedFeatures.samplerAnisotropy;
 
         m_data->textureCompressionBC = supportedFeatures.textureCompressionBC == VK_TRUE;
         m_data->multiDrawIndirect = supportedFeatures.multiDrawIndirect == VK_TRUE;
+        // Reported to callers and used to clamp SamplerDesc::maxAnisotropy. Staying at 1 when the
+        // feature is absent means samplers silently fall back to trilinear rather than failing.
+        m_data->maxAnisotropy = supportedFeatures.samplerAnisotropy == VK_TRUE
+            ? static_cast<uint32_t>(m_data->properties.limits.maxSamplerAnisotropy)
+            : 1u;
 
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;

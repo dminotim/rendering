@@ -16,9 +16,12 @@ namespace dmrender {
     {
         VulkanDevice* device = nullptr;
         VkPipeline pipeline = VK_NULL_HANDLE;
+        /// Owned by the device's layout cache — borrowed here, never destroyed here.
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout bufferSetLayout = VK_NULL_HANDLE;
         VkDescriptorSetLayout textureSetLayout = VK_NULL_HANDLE;
+        /// What each buffer slot's descriptor type is, so draws can write matching descriptors.
+        BufferSlotLayout bufferSlots = defaultBufferSlotLayout();
         /// Keeps the shader modules alive for as long as the pipeline object exists.
         std::shared_ptr<ShaderFunction> vertexFunction;
         std::shared_ptr<ShaderFunction> fragmentFunction;
@@ -49,73 +52,17 @@ namespace dmrender {
 
         VkDevice logicalDevice = m_data->device->logicalDevice();
 
-        // --- Descriptor set 0: buffers. Slot number == binding number. ---
-        std::vector<VkDescriptorSetLayoutBinding> bufferBindings;
-        bufferBindings.reserve(kMaxBindingSlots);
-
-        VkDescriptorSetLayoutBinding vertexStorage{};
-        vertexStorage.binding = 0;
-        vertexStorage.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        vertexStorage.descriptorCount = 1;
-        vertexStorage.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        bufferBindings.push_back(vertexStorage);
-
-        for (uint32_t slot = 1; slot < kMaxBindingSlots; ++slot) {
-            VkDescriptorSetLayoutBinding uniform{};
-            uniform.binding = slot;
-            uniform.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            uniform.descriptorCount = 1;
-            uniform.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-            bufferBindings.push_back(uniform);
-        }
-
-        VkDescriptorSetLayoutCreateInfo bufferLayoutInfo{};
-        bufferLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        bufferLayoutInfo.bindingCount = static_cast<uint32_t>(bufferBindings.size());
-        bufferLayoutInfo.pBindings = bufferBindings.data();
-        VkCheck(vkCreateDescriptorSetLayout(logicalDevice, &bufferLayoutInfo, nullptr, &m_data->bufferSetLayout),
-                "vkCreateDescriptorSetLayout (buffers)");
-
-        // --- Descriptor set 1: textures, again slot number == binding number. ---
-        std::vector<VkDescriptorSetLayoutBinding> textureBindings;
-        textureBindings.reserve(kMaxTextureSlots);
-        for (uint32_t slot = 0; slot < kMaxTextureSlots; ++slot) {
-            VkDescriptorSetLayoutBinding texture{};
-            texture.binding = slot;
-            texture.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            texture.descriptorCount = 1;
-            texture.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-            textureBindings.push_back(texture);
-        }
-
-        VkDescriptorSetLayoutCreateInfo textureLayoutInfo{};
-        textureLayoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        textureLayoutInfo.bindingCount = static_cast<uint32_t>(textureBindings.size());
-        textureLayoutInfo.pBindings = textureBindings.data();
-        VkCheck(vkCreateDescriptorSetLayout(logicalDevice, &textureLayoutInfo, nullptr, &m_data->textureSetLayout),
-                "vkCreateDescriptorSetLayout (textures)");
-
-        const VkDescriptorSetLayout setLayouts[] = {
-            m_data->bufferSetLayout,   // set 0
-            m_data->textureSetLayout   // set 1
-        };
-
-        // One range covering both stages, always declared. A shader that ignores push constants
-        // costs nothing for the range existing, and declaring it unconditionally means any
-        // pipeline can accept setPushConstants() without the caller checking first.
-        VkPushConstantRange pushConstantRange{};
-        pushConstantRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        pushConstantRange.offset = 0;
-        pushConstantRange.size = static_cast<uint32_t>(kMaxPushConstantBytes);
-
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(std::size(setLayouts));
-        pipelineLayoutInfo.pSetLayouts = setLayouts;
-        pipelineLayoutInfo.pushConstantRangeCount = 1;
-        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
-        VkCheck(vkCreatePipelineLayout(logicalDevice, &pipelineLayoutInfo, nullptr, &m_data->pipelineLayout),
-                "vkCreatePipelineLayout");
+        // Descriptor and pipeline layouts come from a device-wide cache keyed on which buffer
+        // slots are storage buffers. A descriptor set layout fixes each binding's type, so the
+        // arrangement has to be settled here, at pipeline creation, rather than at draw time when
+        // it is finally known what got bound — by then the layout is already baked into the
+        // pipeline. Declaring it in PipelineDesc is what makes that possible.
+        m_data->bufferSlots = desc.bufferSlots;
+        const VulkanDevice::PipelineLayoutSet& layouts =
+            m_data->device->acquirePipelineLayout(desc.bufferSlots);
+        m_data->bufferSetLayout = layouts.bufferSet;
+        m_data->textureSetLayout = layouts.textureSet;
+        m_data->pipelineLayout = layouts.pipelineLayout;
 
         // --- Programmable stages ---
         auto* vs = static_cast<VulkanShaderFunction*>(desc.vertexFunction.get());
@@ -260,13 +207,8 @@ namespace dmrender {
         vkDeviceWaitIdle(logicalDevice);
 
         if (m_data->pipeline) vkDestroyPipeline(logicalDevice, m_data->pipeline, nullptr);
-        if (m_data->pipelineLayout) vkDestroyPipelineLayout(logicalDevice, m_data->pipelineLayout, nullptr);
-        if (m_data->bufferSetLayout) {
-            vkDestroyDescriptorSetLayout(logicalDevice, m_data->bufferSetLayout, nullptr);
-        }
-        if (m_data->textureSetLayout) {
-            vkDestroyDescriptorSetLayout(logicalDevice, m_data->textureSetLayout, nullptr);
-        }
+        // The layouts belong to the device's cache and outlive individual pipelines — several
+        // pipelines share one set. The device destroys them.
     }
 
     void* VulkanPipeline::nativeHandle() const { return (void*)&m_data->pipeline; }
@@ -277,5 +219,13 @@ namespace dmrender {
     VkPipelineLayout VulkanPipeline::pipelineLayout() const { return m_data->pipelineLayout; }
     VkDescriptorSetLayout VulkanPipeline::bufferSetLayout() const { return m_data->bufferSetLayout; }
     VkDescriptorSetLayout VulkanPipeline::textureSetLayout() const { return m_data->textureSetLayout; }
+
+    VkDescriptorType VulkanPipeline::descriptorTypeForSlot(uint32_t slot) const
+    {
+        if (slot >= kMaxBindingSlots) return VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        return m_data->bufferSlots[slot] == BufferBindingType::Storage
+            ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER
+            : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+    }
 
 } // namespace dmrender

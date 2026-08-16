@@ -10,6 +10,7 @@
 #include <set>
 
 #include "Device.hpp"
+#include "PipelineState.hpp"   // BufferSlotLayout
 #include "Surface.hpp"
 #include "VulkanMemoryAllocator.hpp"
 
@@ -97,6 +98,7 @@ namespace dmrender {
         MemoryBudget queryMemoryBudget() const override;
 
         SampleCount maxSupportedSampleCount() const override;
+        uint32_t maxSupportedAnisotropy() const override;
 
         void* nativeHandle() const override;
         void* getLogicalDevice() const;
@@ -137,6 +139,32 @@ namespace dmrender {
          * @note Must be called before the view itself is destroyed, and after the device is idle.
          */
         void invalidateFramebuffersUsing(VkImageView view);
+
+        /**
+         * @struct PipelineLayoutSet
+         * @brief The three cached layout objects a pipeline needs, for one buffer slot layout.
+         */
+        struct PipelineLayoutSet {
+            VkDescriptorSetLayout bufferSet = VK_NULL_HANDLE;
+            VkDescriptorSetLayout textureSet = VK_NULL_HANDLE;
+            VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        };
+
+        /**
+         * @brief Returns cached layouts for @p slots, creating them on first use.
+         *
+         * A descriptor set layout fixes each binding's type, so a pipeline whose shader reads a
+         * storage buffer at slot 2 needs a different layout from one that reads a uniform block
+         * there. Rather than hardcoding one arrangement, the device keeps a small table keyed on
+         * which slots are storage — an application typically ends up with two or three entries,
+         * built once at startup.
+         *
+         * Caching also fixes an older wastefulness: every pipeline used to create, own and destroy
+         * its own identical copies of these objects.
+         *
+         * @note The device owns the returned handles; do not destroy them.
+         */
+        const PipelineLayoutSet& acquirePipelineLayout(const BufferSlotLayout& slots);
 
         /**
          * @brief Picks a memory type index, preferring @p preferred and falling back to @p required.

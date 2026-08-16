@@ -15,6 +15,27 @@ namespace dmrender {
             case ImageFormat::R32_FLOAT:
                 return MTLPixelFormatR32Float;
 
+            case ImageFormat::RGBA8_SRGB:
+                return MTLPixelFormatRGBA8Unorm_sRGB;
+            case ImageFormat::BGRA8_SRGB:
+                return MTLPixelFormatBGRA8Unorm_sRGB;
+
+            case ImageFormat::R8_UNORM:
+                return MTLPixelFormatR8Unorm;
+            case ImageFormat::RG8_UNORM:
+                return MTLPixelFormatRG8Unorm;
+            case ImageFormat::R16_FLOAT:
+                return MTLPixelFormatR16Float;
+            case ImageFormat::RG16_FLOAT:
+                return MTLPixelFormatRG16Float;
+            // Metal names packed formats from the least significant bit up, Vulkan from the most
+            // significant bit down, so VK_FORMAT_A2B10G10R10_UNORM_PACK32 is the same bit layout
+            // as this one despite reading backwards.
+            case ImageFormat::RGB10A2_UNORM:
+                return MTLPixelFormatRGB10A2Unorm;
+            case ImageFormat::R11G11B10_FLOAT:
+                return MTLPixelFormatRG11B10Float;
+
                 // Depth formats (usable for depth textures only, not CAMetalLayer)
             case ImageFormat::D32_FLOAT:
                 return MTLPixelFormatDepth32Float;

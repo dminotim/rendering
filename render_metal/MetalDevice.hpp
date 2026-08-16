@@ -46,6 +46,7 @@ public:
     MemoryBudget queryMemoryBudget() const override;
 
     SampleCount maxSupportedSampleCount() const override;
+    uint32_t maxSupportedAnisotropy() const override;
 
     /**
      * @brief Copies CPU data into a private-storage MTLBuffer through a staging buffer.

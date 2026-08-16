@@ -60,6 +60,28 @@ namespace dmrender {
          */
         float minLod = 0.0f;
         float maxLod = 1000.0f;
+
+        /**
+         * @brief How many samples the hardware may take along the axis of anisotropy. 1 is off.
+         *
+         * A pixel viewed at a grazing angle — a floor receding towards the horizon is the standard
+         * case — covers an elongated footprint in the texture: a few texels across, dozens along.
+         * Ordinary trilinear filtering can only pick a square region, so it selects the mip level
+         * that covers the *long* axis and blurs the short one away with it. The floor turns to mush
+         * well before the horizon.
+         *
+         * Anisotropic filtering takes several samples along the long axis instead, keeping the
+         * short axis sharp. It costs texture bandwidth roughly in proportion to the value, and on
+         * every desktop GPU it is one of the cheapest quality wins available.
+         *
+         * Values above the device limit are clamped rather than rejected, so passing 16 is safe
+         * everywhere. Ask Device::maxSupportedAnisotropy() when the number matters — for a quality
+         * setting in a menu, say.
+         *
+         * @note Only affects minification. Magnified textures are unaffected, so a value above 1
+         *       costs nothing on textures that are only ever seen close up.
+         */
+        uint32_t maxAnisotropy = 1;
     };
 
     /**

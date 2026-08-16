@@ -198,6 +198,12 @@ namespace dmrender
         return SampleCount::One;
     }
 
+    uint32_t MetalDevice::maxSupportedAnisotropy() const {
+        // Metal guarantees anisotropic filtering on every device it runs on and fixes the ceiling
+        // at 16 — there is no feature flag and no limit to query, unlike Vulkan.
+        return m_data->m_device ? 16u : 1u;
+    }
+
     void MetalDevice::uploadToPrivateBuffer(void* destination,
                                             size_t destinationOffset,
                                             const void* data,
