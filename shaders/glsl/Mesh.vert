@@ -20,25 +20,27 @@ layout(std430, set = 0, binding = 0) readonly buffer VertexBuffer {
     MeshVertex vertices[];
 } vertexBuffer;
 
-// 64 bytes of matrix + 64 of parameters = the full 128 bytes push constants guarantee.
+// 64 bytes of matrix plus 48 of parameters, inside the 128 push constants guarantee.
 layout(push_constant) uniform SceneConstants {
     mat4 modelViewProjection;
-    vec4 lightDirection;    // xyz: направление на источник, w не используется
-    vec4 baseColor;         // rgb: цвет материала, a: 1 если есть текстура
-    vec4 cameraParams;      // x: аммбиентная доля, yzw свободны
+    vec4 lightDirection;    // xyz: direction towards the light, w unused
+    vec4 baseColor;         // rgb: material colour, a: 1 when a texture is bound
+    vec4 cameraParams;      // x: ambient amount, yzw unused
 } constants;
 
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec2 outUv;
 
 void main() {
-    MeshVertex vertex = vertexBuffer.vertices[gl_VertexIndex];
+    // Named `v` rather than `vertex` to mirror Mesh.metal, where `vertex` is a reserved
+    // function qualifier and will not compile as a local.
+    MeshVertex v = vertexBuffer.vertices[gl_VertexIndex];
 
-    gl_Position = constants.modelViewProjection * vec4(vertex.position, 1.0);
+    gl_Position = constants.modelViewProjection * vec4(v.position, 1.0);
 
-    // Модель вращается только вокруг своей оси и не масштабируется неравномерно, поэтому
-    // нормаль можно передать как есть — обратная транспонированная матрица здесь совпала бы
-    // с обычной. Для произвольного преобразования её пришлось бы считать отдельно.
-    outNormal = vertex.normal;
-    outUv = vertex.uv;
+    // The model only rotates and scales uniformly, so the normal passes through unchanged —
+    // an inverse-transpose matrix would equal the ordinary one here. An arbitrary transform
+    // would need that computed separately.
+    outNormal = v.normal;
+    outUv = v.uv;
 }

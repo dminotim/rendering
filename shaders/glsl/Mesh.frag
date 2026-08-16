@@ -2,9 +2,9 @@
 
 // GLSL/SPIR-V port of `mesh_fragment_shader` from shaders/metal/Mesh.metal.
 //
-// Простое направленное освещение с полусферическим окружением: достаточно, чтобы форма модели
-// читалась, и достаточно мало, чтобы не отвлекать от того, что демонстрируется — загрузку
-// геометрии.
+// Simple directional lighting with a hemisphere ambient term: enough for the model's shape to
+// read clearly, and little enough not to distract from what is being demonstrated, which is
+// geometry loading.
 
 layout(push_constant) uniform SceneConstants {
     mat4 modelViewProjection;
@@ -13,7 +13,7 @@ layout(push_constant) uniform SceneConstants {
     vec4 cameraParams;
 } constants;
 
-// Текстуры живут в наборе 1; см. соглашения в ShaderFunction.hpp.
+// Textures live in descriptor set 1; see the conventions in ShaderFunction.hpp.
 layout(set = 1, binding = 0) uniform sampler2D albedoTexture;
 
 layout(location = 0) in vec3 inNormal;
@@ -25,15 +25,15 @@ void main() {
     vec3 normal = normalize(inNormal);
     vec3 lightDirection = normalize(constants.lightDirection.xyz);
 
-    // Полусферический окружающий свет: сверху холоднее, снизу теплее. Он не даёт теневой
-    // стороне провалиться в чёрное, что при одном источнике выглядело бы плоско.
+    // Hemisphere ambient: cooler from above, warmer from below. It stops the shadowed side
+    // dropping to black, which with a single light would read as flat.
     float hemisphere = normal.y * 0.5 + 0.5;
     vec3 ambient = mix(vec3(0.16, 0.15, 0.20), vec3(0.34, 0.36, 0.42), hemisphere);
 
     float diffuse = max(dot(normal, lightDirection), 0.0);
 
-    // Мягкий бликовый член по модели Блинна — Фонга, с направлением взгляда, приближённым
-    // осью Z. Точная камера здесь ничего бы не добавила.
+    // A soft Blinn-Phong specular term with the view direction approximated by the Z axis.
+    // A precise camera vector would add nothing visible here.
     vec3 halfway = normalize(lightDirection + vec3(0.0, 0.0, 1.0));
     float specular = pow(max(dot(normal, halfway), 0.0), 48.0) * 0.25;
 

@@ -51,11 +51,20 @@ namespace dmrender
 
         // --- Frame lifecycle, driven by VulkanSwapChain and VulkanCommandBuffer ---
 
-        /// @brief Waits for the current slot to be free, then resets its command buffer and pool.
+        /**
+         * @brief Waits for the current slot to be free, then resets its command buffer and pool.
+         *
+         * Idempotent within a frame: both acquireNextImage() and the command buffer constructor
+         * call it, since either may be the first thing a frame does, and only the first call
+         * does the work.
+         */
         void beginFrame();
 
         /// @brief Advances to the next frame slot. Called after a successful submit + present.
         void endFrame();
+
+        /// @brief Marks an opened frame slot as unused, so reopening it redoes the resets.
+        void abandonFrame();
 
         uint32_t currentFrameSlot() const;
         VkCommandBuffer currentCommandBuffer() const;
