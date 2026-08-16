@@ -90,6 +90,10 @@ set(ALL_SOURCE_FILES
         FastRenderer.hpp
         FastRenderer.cpp
 
+        # Model loading (application-level: the abstraction knows nothing about file formats)
+        mesh/Mesh.hpp
+        mesh/Mesh.cpp
+
         # ImGui core and common backend files
         external/imgui/imgui.cpp
         external/imgui/imgui_draw.cpp
@@ -105,6 +109,15 @@ set(ALL_SOURCE_FILES
 )
 
 add_executable(${APP_NAME} ${ALL_SOURCE_FILES})
+
+# tinyobjloader embeds a copy of fast_float whose C++20 constexpr paths MSVC rejects: the
+# SIMD digit-parsing helpers are marked constexpr but call intrinsics, and MSVC enforces that
+# strictly. Compiling just this translation unit as C++17 turns those paths off — the feature
+# macros fast_float tests for are simply absent — without patching vendored code or lowering
+# the standard for the whole project.
+if(MSVC)
+    set_source_files_properties(mesh/Mesh.cpp PROPERTIES COMPILE_OPTIONS "/std:c++17")
+endif()
 
 # --- Shader Compilation (Vulkan only) ---
 # Metal compiles PlaneShader.metal at runtime and picks the entry point by name. Vulkan has no
@@ -129,21 +142,17 @@ if(WIN32)
 
     # source file : logical function name : name of the .metal file it corresponds to
     #
+    # Only the shaders the viewer actually uses are compiled. The earlier demo shaders
+    # (PlaneShader, Composite, Overlay, Cube) are still on disk and referenced by the docs; add
+    # them back here to build them again.
+    #
     # The last field exists because several GLSL sources map onto entry points of a single Metal
     # file — PlaneShader.metal holds both plane_fragment_shader and plane_fragment_shader_mrt —
     # and the artifact must be named after the file the application asks for, not after the GLSL
     # source it happened to be compiled from.
     set(GLSL_SHADERS
-            "PlaneShader.vert:plane_vertex_shader:PlaneShader"
-            "PlaneShader.frag:plane_fragment_shader:PlaneShader"
-            "PlaneShaderMRT.frag:plane_fragment_shader_mrt:PlaneShader"
-            "Composite.vert:composite_vertex_shader:Composite"
-            "Composite.frag:composite_fragment_shader:Composite"
-            "CompositeMRT.frag:composite_fragment_shader_mrt:Composite"
-            "Overlay.vert:overlay_vertex_shader:Overlay"
-            "Overlay.frag:overlay_fragment_shader:Overlay"
-            "Cube.vert:cube_vertex_shader:Cube"
-            "Cube.frag:cube_fragment_shader:Cube"
+            "Mesh.vert:mesh_vertex_shader:Mesh"
+            "Mesh.frag:mesh_fragment_shader:Mesh"
     )
 
     set(SPIRV_OUTPUTS "")
@@ -172,16 +181,8 @@ if(WIN32)
 
     # Keep the GLSL sources visible in the IDE next to the rest of the project.
     set(GLSL_SOURCE_FILES
-            shaders/glsl/PlaneShader.vert
-            shaders/glsl/PlaneShader.frag
-            shaders/glsl/PlaneShaderMRT.frag
-            shaders/glsl/Composite.vert
-            shaders/glsl/Composite.frag
-            shaders/glsl/CompositeMRT.frag
-            shaders/glsl/Overlay.vert
-            shaders/glsl/Overlay.frag
-            shaders/glsl/Cube.vert
-            shaders/glsl/Cube.frag
+            shaders/glsl/Mesh.vert
+            shaders/glsl/Mesh.frag
     )
     target_sources(${APP_NAME} PRIVATE ${GLSL_SOURCE_FILES})
     set_source_files_properties(${GLSL_SOURCE_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
@@ -193,6 +194,11 @@ target_include_directories(${APP_NAME} PRIVATE
         external/glfw/include
         external/imgui
         external/imgui/backends
+
+        # Header-only model loaders (all MIT licensed)
+        external/tinyobjloader     # OBJ + MTL, including texture references
+        external/happly            # PLY, binary and ASCII
+        external/microstl          # STL, binary and ASCII
 
         # Project-specific headers
         . # Include the root project directory for FastRenderer.hpp etc.
