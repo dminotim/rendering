@@ -33,7 +33,7 @@ namespace dmrender {
         id<CAMetalDrawable> drawable = [m_data->m_layer nextDrawable];
 
         if (!drawable) {
-            return nullptr; // окно может быть свернуто
+            return nullptr; // the window may be minimised
         }
         auto metalImg = std::make_shared<MetalImage>(
                 drawable, m_surface->getFormat(), ImageUsage::ColorTarget, ImageType::Image2D);

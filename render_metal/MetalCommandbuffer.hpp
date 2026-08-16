@@ -29,7 +29,7 @@ namespace dmrender {
         void setPushConstants(
                 ShaderStage stage, const void* data, size_t size, size_t offset = 0) override;
 
-        // --- Команды отрисовки ---
+        // --- Draw commands ---
         void draw(uint32_t vertexCount, uint32_t instanceCount, uint32_t firstVertex, uint32_t firstInstance) override;
         void drawIndexed(const std::shared_ptr<GBuffer>& indexBuffer,
                          IndexType indexType,

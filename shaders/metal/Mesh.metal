@@ -2,12 +2,12 @@
 using namespace metal;
 
 // ─────────────────────────────────────────────────────────────
-// Отрисовка загруженной модели: направленный источник плюс полусферическое
-// окружение. Геометрия читается из буфера по индексу вершины — той же моделью,
-// что и в остальном проекте.
+// Draws a loaded model: one directional light plus a hemisphere ambient term.
+// Geometry is read from a buffer indexed by vertex id — the same model used
+// everywhere else in this project.
 //
-// Структура ниже обязана совпадать с MeshVertex из mesh/Mesh.hpp побайтово,
-// отсюда явные поля выравнивания: vec3 в массиве занимает 16 байт, а не 12.
+// The struct below must match MeshVertex in mesh/Mesh.hpp byte for byte, hence
+// the explicit padding: a vec3 inside an array occupies 16 bytes, not 12.
 // ─────────────────────────────────────────────────────────────
 
 struct MeshVertex {
@@ -21,9 +21,9 @@ struct MeshVertex {
 
 struct SceneConstants {
     float4x4 modelViewProjection;
-    float4 lightDirection;   // xyz: направление на источник
-    float4 baseColor;        // rgb: цвет материала, a: 1 если есть текстура
-    float4 cameraParams;     // x: аммбиентная доля
+    float4 lightDirection;   // xyz: direction towards the light
+    float4 baseColor;        // rgb: material colour, a: 1 when a texture is bound
+    float4 cameraParams;     // x: ambient amount
 };
 
 struct VertexOut {
@@ -37,14 +37,17 @@ vertex VertexOut mesh_vertex_shader(
 constant SceneConstants& constants [[buffer(8)]],
 uint vertex_id [[vertex_id]]
 ) {
-MeshVertex vertex = vertex_array[vertex_id];
+// `vertex` is a Metal function qualifier and cannot name a local, so this is `v`.
+// GLSL has no such restriction, but Mesh.vert uses the same name to keep the two readable
+// side by side.
+MeshVertex v = vertex_array[vertex_id];
 
 VertexOut out;
-out.clipSpacePosition = constants.modelViewProjection * float4(float3(vertex.position), 1.0);
-// Модель только вращается и масштабируется равномерно, поэтому нормаль передаётся
-// как есть; для произвольного преобразования понадобилась бы обратная транспонированная.
-out.normal = float3(vertex.normal);
-out.uv = float2(vertex.uv);
+out.clipSpacePosition = constants.modelViewProjection * float4(float3(v.position), 1.0);
+// The model only rotates and scales uniformly, so the normal passes through unchanged;
+// an arbitrary transform would need an inverse-transpose matrix.
+out.normal = float3(v.normal);
+out.uv = float2(v.uv);
 return out;
 }
 
@@ -57,13 +60,14 @@ sampler samplerState [[sampler(0)]]
 float3 normal = normalize(in.normal);
 float3 lightDirection = normalize(constants.lightDirection.xyz);
 
-// Полусферическое окружение: сверху холоднее, снизу теплее. Не даёт теневой стороне
-// провалиться в чёрное.
+// Hemisphere ambient: cooler from above, warmer from below. Stops the shadowed side
+// dropping to black.
 float hemisphere = normal.y * 0.5 + 0.5;
 float3 ambient = mix(float3(0.16, 0.15, 0.20), float3(0.34, 0.36, 0.42), hemisphere);
 
 float diffuse = max(dot(normal, lightDirection), 0.0);
 
+// A soft Blinn-Phong specular term with the view direction approximated by the Z axis.
 float3 halfway = normalize(lightDirection + float3(0.0, 0.0, 1.0));
 float specular = pow(max(dot(normal, halfway), 0.0), 48.0) * 0.25;
 

@@ -133,7 +133,7 @@ namespace dmrender {
 
             tinyobj::ObjReader reader;
             if (!reader.ParseFromFile(path.string(), config)) {
-                error = reader.Error().empty() ? "не удалось разобрать OBJ" : reader.Error();
+                error = reader.Error().empty() ? "failed to parse OBJ" : reader.Error();
                 return false;
             }
 
@@ -234,7 +234,7 @@ namespace dmrender {
             microstl::MeshReaderHandler handler;
             const microstl::Result result = microstl::Reader::readStlFile(path, handler);
             if (result != microstl::Result::Success) {
-                error = "не удалось прочитать STL: " + std::string(microstl::getResultString(result));
+                error = "failed to read STL: " + std::string(microstl::getResultString(result));
                 return false;
             }
 
@@ -305,7 +305,7 @@ namespace dmrender {
                 }
             }
             catch (const std::exception& e) {
-                error = std::string("не удалось прочитать PLY: ") + e.what();
+                error = std::string("failed to read PLY: ") + e.what();
                 return false;
             }
 
@@ -323,7 +323,7 @@ namespace dmrender {
         error.clear();
 
         if (!std::filesystem::exists(path)) {
-            error = "файл не найден: " + path.string();
+            error = "file not found: " + path.string();
             return mesh;
         }
 
@@ -336,7 +336,7 @@ namespace dmrender {
         else if (extension == ".stl") ok = loadStl(path, mesh, error);
         else if (extension == ".ply") ok = loadPly(path, mesh, error);
         else {
-            error = "неподдерживаемое расширение: " + extension + " (ожидается .obj, .stl или .ply)";
+            error = "unsupported extension: " + extension + " (expected .obj, .stl or .ply)";
             return mesh;
         }
 
@@ -344,7 +344,7 @@ namespace dmrender {
             return Mesh{};
         }
         if (mesh.empty()) {
-            error = "файл разобран, но не содержит треугольников";
+            error = "file parsed but contains no triangles";
             return Mesh{};
         }
 

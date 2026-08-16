@@ -22,6 +22,8 @@ namespace dmrender
 		std::vector<VkDescriptorPool> descriptorPools;
 
 		uint32_t currentFrameSlot = 0;
+		/// True between opening a frame slot and finishing with it. See beginFrame().
+		bool frameOpen = false;
 
 		/// Cleared every time the frame slot's descriptor pool is reset.
 		std::unordered_map<uint64_t, VkDescriptorSet> descriptorCache;
@@ -115,12 +117,18 @@ namespace dmrender
 
 	void VulkanCommandQueues::beginFrame()
 	{
+		// Two callers open the frame: acquireNextImage() and the command buffer's constructor,
+		// because either can be the first thing a frame does. Only the first call should do the
+		// work — repeating the resets is legal but pointless, and re-resetting a command buffer
+		// that has already begun recording would be a genuine bug if the order ever changed.
+		if (m_data->frameOpen) return;
+
 		VkDevice logicalDevice = m_data->device->logicalDevice();
 		const uint32_t slot = m_data->currentFrameSlot;
 
 		// Block until the GPU is done with everything recorded into this slot two frames ago.
-		// The fence is only reset right before the submit, so calling beginFrame() twice in a
-		// row (which happens when an acquire fails and the frame is skipped) is harmless.
+		// The fence is only reset right before the submit, so a frame that is opened and then
+		// skipped (an acquire that fails) leaves it signalled and costs nothing next time.
 		VkCheck(vkWaitForFences(logicalDevice, 1, &m_data->inFlightFences[slot], VK_TRUE, UINT64_MAX),
 		        "vkWaitForFences");
 
@@ -134,6 +142,14 @@ namespace dmrender
 		m_data->descriptorCacheRequests = 0;
 
 		m_data->device->setCurrentFrameSlot(slot);
+		m_data->frameOpen = true;
+	}
+
+	void VulkanCommandQueues::abandonFrame()
+	{
+		// The slot was opened but nothing was submitted into it. Reopening it must redo the
+		// resets, so the flag has to come back down.
+		m_data->frameOpen = false;
 	}
 
 	VkDescriptorSet VulkanCommandQueues::findCachedDescriptorSet(uint64_t key) const
@@ -159,6 +175,7 @@ namespace dmrender
 
 	void VulkanCommandQueues::endFrame()
 	{
+		m_data->frameOpen = false;
 		m_data->currentFrameSlot = (m_data->currentFrameSlot + 1) % kFramesInFlight;
 		m_data->device->setCurrentFrameSlot(m_data->currentFrameSlot);
 	}

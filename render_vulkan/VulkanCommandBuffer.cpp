@@ -134,6 +134,10 @@ namespace dmrender
             m_data->renderPassActive = false;
         }
         vkEndCommandBuffer(m_data->cmdBuffer);
+
+        // Nothing was submitted into this slot, so the next frame must reset it again rather
+        // than treating it as already opened.
+        m_data->queue->abandonFrame();
     }
 
     void VulkanCommandBuffer::beginRenderPass(std::shared_ptr<RenderPassDescriptor> pass)

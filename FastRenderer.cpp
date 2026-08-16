@@ -1,9 +1,9 @@
 // ───────────────────────────────────────────────
-// FastRenderer.cpp — просмотрщик моделей
+// FastRenderer.cpp — model viewer
 //
-// Загружает модель (.obj / .stl / .ply) и рисует её с тестом глубины и сглаживанием.
-// Весь цикл кадра написан один раз поверх абстракций из render_pipeline/ и работает
-// на обоих бэкендах без единой директивы условной компиляции.
+// Loads a model (.obj / .stl / .ply) and draws it with depth testing and anti-aliasing.
+// The whole frame loop is written once against the abstractions in render_pipeline/ and runs
+// on both backends without a single conditional-compilation directive.
 // ───────────────────────────────────────────────
 #include "FastRenderer.hpp"
 #include <GLFW/glfw3.h>
@@ -36,15 +36,15 @@
 
 namespace dmrender
 {
-    /// Формат цветовой цели. Линейный, как и у поверхности, — шейдер пишет то, что видно.
+    /// Colour target format. Linear, like the surface, so the shader writes what is displayed.
     constexpr ImageFormat kColorFormat = ImageFormat::BGRA8_UNORM;
-    /// 32-битная плавающая глубина поддерживается как цель везде.
+    /// 32-bit float depth is supported as an attachment everywhere.
     constexpr ImageFormat kDepthFormat = ImageFormat::D32_FLOAT;
 
-    /// Модель по умолчанию, если приложению не передали путь.
+    /// Model used when the application is given no path.
     constexpr const char* kDefaultModel = "bunny.obj";
 
-    /// 112 байт: матрица плюс три вектора. Укладывается в гарантированные 128.
+    /// 112 bytes: one matrix plus three vectors. Fits the guaranteed 128.
     struct SceneConstants {
         float modelViewProjection[16];   // 64
         float lightDirection[4];         // 16
@@ -55,11 +55,11 @@ namespace dmrender
                   "SceneConstants must fit the guaranteed push constant range");
 
     // ─────────────────────────────────────────────────────────────────────────
-    // Минимальная матричная математика. Это код приложения, а не библиотеки:
-    // абстракция намеренно ничего не знает про матрицы.
+    // Minimal matrix maths. This is application code, not library code: the
+    // abstraction deliberately knows nothing about matrices.
     // ─────────────────────────────────────────────────────────────────────────
 
-    using Mat4 = std::array<float, 16>;   // по столбцам, как в GLSL и MSL
+    using Mat4 = std::array<float, 16>;   // column-major, as in GLSL and MSL
 
     Mat4 multiply(const Mat4& a, const Mat4& b)
     {
@@ -77,10 +77,10 @@ namespace dmrender
     }
 
     /**
-     * @brief Правосторонняя перспектива с диапазоном глубины 0..1.
+     * @brief Right-handed perspective projection with a 0..1 depth range.
      *
-     * Ни переворота Y, ни пересчёта Z: обёртка выравняла пространство отсечения между
-     * бэкендами, поэтому одна матрица работает на обеих платформах.
+     * No Y flip and no Z remap: the wrapper aligned clip space between the backends, so one
+     * matrix works on both platforms.
      */
     Mat4 perspective(float fovYRadians, float aspect, float nearZ, float farZ)
     {
@@ -141,27 +141,33 @@ namespace dmrender
 
     void run_loop()
     {
-        // ── Загрузка модели до создания устройства: если её нет, незачем открывать окно ──
+        // ── Load the model before creating a device: no point opening a window without one ──
+        // The executable lands in build/<config>/, so the model sits two levels above the
+        // working directory when it is launched from there, and zero levels above when it is
+        // launched from the repository root. Walk up a few levels rather than guessing which.
         std::filesystem::path modelPath = kDefaultModel;
-        if (!std::filesystem::exists(modelPath)) {
-            // Запуск из каталога сборки — типичный случай, поэтому пробуем и уровнем выше.
-            modelPath = std::filesystem::path("..") / kDefaultModel;
+        {
+            std::filesystem::path prefix;
+            for (int level = 0; level <= 4 && !std::filesystem::exists(modelPath); ++level) {
+                prefix /= "..";
+                modelPath = prefix / kDefaultModel;
+            }
         }
 
         std::string loadError;
         const Mesh mesh = loadMesh(modelPath, loadError);
         if (mesh.empty()) {
-            std::fprintf(stderr, "Не удалось загрузить модель: %s\n", loadError.c_str());
+            std::fprintf(stderr, "Failed to load model: %s\n", loadError.c_str());
             return;
         }
 
         std::fprintf(stderr,
-                     "Модель %s: формат %s, %zu вершин, %zu треугольников, %zu материалов\n"
-                     "  нормали: %s, текстурные координаты: %s\n",
+                     "Model %s: format %s, %zu vertices, %zu triangles, %zu materials\n"
+                     "  normals: %s, texture coordinates: %s\n",
                      modelPath.string().c_str(), mesh.sourceFormat.c_str(),
                      mesh.vertices.size(), mesh.indices.size() / 3, mesh.materials.size(),
-                     mesh.hadNormals ? "из файла" : "построены при загрузке",
-                     mesh.hadTexCoords ? "есть" : "нет");
+                     mesh.hadNormals ? "from file" : "generated on load",
+                     mesh.hadTexCoords ? "present" : "absent");
 
         if (!glfwInit()) return;
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
@@ -187,9 +193,8 @@ namespace dmrender
 
         helper::initImgui(swapChain);
 
-        // ── Геометрия в видеопамяти ──
-        // Static: пишется один раз, читается каждый кадр — окупает загрузку через
-        // промежуточный буфер.
+        // ── Geometry in video memory ──
+        // Static: written once, read every frame — repays the staging upload.
         std::shared_ptr<GBuffer> vertexBuffer = device->createBuffer(
             BufferType::Vertex, BufferUsage::Static,
             mesh.vertices.size() * sizeof(MeshVertex), mesh.vertices.data(), "MeshVertices");
@@ -197,9 +202,9 @@ namespace dmrender
             BufferType::Index, BufferUsage::Static,
             mesh.indices.size() * sizeof(uint32_t), mesh.indices.data(), "MeshIndices");
 
-        // ── Текстуры материалов ──
-        // Загружаются только те, что модель действительно называет. У bunny.obj их нет,
-        // поэтому шейдер получит однопиксельную заглушку и умножит на белое.
+        // ── Material textures ──
+        // Only textures the model actually names get loaded. bunny.obj has none, so the shader
+        // gets a one-pixel stand-in and multiplies by white.
         SamplerDesc samplerDesc{};
         samplerDesc.addressU = SamplerAddressMode::Repeat;
         samplerDesc.addressV = SamplerAddressMode::Repeat;
@@ -214,7 +219,7 @@ namespace dmrender
         whiteDesc.debugName = "WhiteFallback";
         std::shared_ptr<GImage> whiteTexture = device->createImage(whiteDesc, whitePixel);
 
-        // ── Шейдеры и пайплайны ──
+        // ── Shaders and pipelines ──
         const std::filesystem::path meshShaderPath = std::filesystem::path(SHADER_DIR) / "Mesh";
         std::shared_ptr<ShaderFunction> meshVertexFunction =
             helper::createShaderFunction(device, meshShaderPath, "mesh_vertex_shader");
@@ -225,9 +230,9 @@ namespace dmrender
         const SampleCount msaaSamples =
             static_cast<uint32_t>(maxSamples) >= 4 ? SampleCount::Four : maxSamples;
 
-        // Число сэмплов запекается в пайплайн, поэтому переключатель сглаживания требует
-        // двух готовых вариантов, а не изменения состояния на лету.
-        auto makeMeshPipeline = [&](SampleCount samples, PolygonMode polygonMode) {
+        // Sample count is baked into a pipeline, so an anti-aliasing toggle needs two prebuilt
+        // variants rather than a state change at draw time.
+        auto makeMeshPipeline = [&](SampleCount samples) {
             PipelineDesc desc{};
             desc.vertexFunction = meshVertexFunction;
             desc.fragmentFunction = meshFragmentFunction;
@@ -235,15 +240,14 @@ namespace dmrender
             desc.depthStencil = DepthStencilState::depthTestAndWrite();
             desc.rasterizer.cullMode = CullMode::Back;
             desc.rasterizer.frontFace = FrontFace::CounterClockwise;
-            desc.rasterizer.polygonMode = polygonMode;
             desc.debugName = "MeshPipeline";
             return helper::createPipeline(device, desc);
         };
 
-        std::shared_ptr<Pipeline> meshPipeline = makeMeshPipeline(SampleCount::One, PolygonMode::Fill);
-        std::shared_ptr<Pipeline> meshPipelineMSAA = makeMeshPipeline(msaaSamples, PolygonMode::Fill);
+        std::shared_ptr<Pipeline> meshPipeline = makeMeshPipeline(SampleCount::One);
+        std::shared_ptr<Pipeline> meshPipelineMSAA = makeMeshPipeline(msaaSamples);
 
-        // ── Цели рендеринга, пересоздаваемые при изменении размера окна ──
+        // ── Render targets, recreated when the window changes size ──
         std::shared_ptr<GImage> msaaColorTarget;
         std::shared_ptr<GImage> depthTarget;
         std::shared_ptr<GImage> msaaDepthTarget;
@@ -279,9 +283,9 @@ namespace dmrender
             targetHeight = height;
         };
 
-        // ── Камера, подогнанная под габариты модели ──
-        // Модель может быть любого масштаба — от долей единицы до тысяч, — поэтому её
-        // нормализуем, а не подбираем камеру под каждый файл.
+        // ── Camera framed on the model's bounds ──
+        // A model can be any scale, from fractions of a unit to thousands, so it is normalised
+        // rather than the camera being tuned per file.
         const std::array<float, 3> meshCenter = mesh.center();
         const float meshExtent = mesh.boundsExtent();
         const float normalizeScale = meshExtent > 1e-6f ? 1.0f / meshExtent : 1.0f;
@@ -289,14 +293,11 @@ namespace dmrender
         float yaw = 0.6f;
         float pitch = 0.25f;
         float distance = 2.2f;
-        bool autoRotate = true;
         bool useMsaa = msaaSamples != SampleCount::One;
         float ambientAmount = 1.0f;
         float lightYaw = 0.9f;
         float lightPitch = 0.8f;
         ClearValue clearColor = { 0.09f, 0.10f, 0.12f, 1.0f };
-
-        double lastTime = glfwGetTime();
 
         while (!glfwWindowShouldClose(window))
         {
@@ -305,25 +306,20 @@ namespace dmrender
             std::shared_ptr<GImage> nextImgToDraw = swapChain->acquireNextImage();
             if (!nextImgToDraw) { continue; }
 
-            // Размеры целей берутся у свопчейна, а не у окна. Свопчейн выбирает протяжённость
-            // по возможностям поверхности, и во время изменения размера она может на кадр
-            // разойтись с тем, что сообщает оконная система. Любое вложение прохода обязано
-            // совпадать по размеру с изображением свопчейна, с которым оно используется.
+            // Target sizes come from the swapchain, not the window. The swapchain picks its
+            // extent from the surface capabilities, and during a resize that can disagree for a
+            // frame with what the window system reports. Every attachment of a pass must match
+            // the size of the swapchain image it is used with.
             fbWidth = static_cast<int>(swapChain->width());
             fbHeight = static_cast<int>(swapChain->height());
             if (fbWidth == 0 || fbHeight == 0) { continue; }
             ensureTargets(fbWidth, fbHeight);
 
-            const double now = glfwGetTime();
-            const float deltaTime = static_cast<float>(now - lastTime);
-            lastTime = now;
-            if (autoRotate) yaw += deltaTime * 0.4f;
-
-            // ── Интерфейс ──
-            // Отдельный проход поверх сцены. ImGui собрал свой пайплайн под конфигурацию
-            // свопчейна — один сэмпл, без глубины, — и внутри многосэмплового прохода со
-            // глубиной он несовместим. Разделение на «сцена» и «интерфейс» решает это и
-            // заодно отражает то, чем эти проходы являются.
+            // ── User interface ──
+            // A separate pass over the scene. ImGui built its pipeline against the swapchain
+            // configuration — one sample, no depth — and is incompatible inside a multisampled
+            // pass with depth. Splitting "scene" from "interface" resolves that and also
+            // reflects what these passes actually are.
             std::shared_ptr<RenderPassDescriptor> uiPass = helper::createRenderPassDescriptor();
             uiPass->setColorAttachment(0, nextImgToDraw, /*clear=*/false, clearColor);
 
@@ -333,34 +329,33 @@ namespace dmrender
             {
                 ImGui::Begin("Model");
                 ImGui::Text("%s", modelPath.filename().string().c_str());
-                ImGui::Text("Формат: %s", mesh.sourceFormat.c_str());
-                ImGui::Text("Вершин: %zu", mesh.vertices.size());
-                ImGui::Text("Треугольников: %zu", mesh.indices.size() / 3);
-                ImGui::Text("Нормали: %s", mesh.hadNormals ? "из файла" : "построены");
+                ImGui::Text("Format: %s", mesh.sourceFormat.c_str());
+                ImGui::Text("Vertices: %zu", mesh.vertices.size());
+                ImGui::Text("Triangles: %zu", mesh.indices.size() / 3);
+                ImGui::Text("Normals: %s", mesh.hadNormals ? "from file" : "generated");
                 if (!mesh.materials.empty()) {
-                    ImGui::Text("Материалов: %zu", mesh.materials.size());
+                    ImGui::Text("Materials: %zu", mesh.materials.size());
                 }
-                ImGui::Text("Габарит: %.3f", meshExtent);
+                ImGui::Text("Bounds extent: %.3f", meshExtent);
 
                 ImGui::Separator();
-                ImGui::Checkbox("Вращение", &autoRotate);
-                ImGui::SliderFloat("Поворот", &yaw, -3.14159f, 3.14159f);
-                ImGui::SliderFloat("Наклон", &pitch, -1.5f, 1.5f);
-                ImGui::SliderFloat("Дистанция", &distance, 1.2f, 6.0f);
+                ImGui::SliderFloat("Yaw", &yaw, -3.14159f, 3.14159f);
+                ImGui::SliderFloat("Pitch", &pitch, -1.5f, 1.5f);
+                ImGui::SliderFloat("Distance", &distance, 1.2f, 6.0f);
 
                 ImGui::Separator();
                 if (msaaSamples == SampleCount::One) {
-                    ImGui::TextUnformatted("Сглаживание недоступно");
+                    ImGui::TextUnformatted("MSAA unsupported on this device");
                 } else {
-                    ImGui::Checkbox("Сглаживание", &useMsaa);
+                    ImGui::Checkbox("MSAA", &useMsaa);
                     ImGui::SameLine();
                     ImGui::Text("(%ux)", static_cast<uint32_t>(msaaSamples));
                 }
 
                 ImGui::Separator();
-                ImGui::SliderFloat("Окружение", &ambientAmount, 0.0f, 2.0f);
-                ImGui::SliderFloat("Свет: поворот", &lightYaw, -3.14159f, 3.14159f);
-                ImGui::SliderFloat("Свет: наклон", &lightPitch, -1.5f, 1.5f);
+                ImGui::SliderFloat("Ambient", &ambientAmount, 0.0f, 2.0f);
+                ImGui::SliderFloat("Light yaw", &lightYaw, -3.14159f, 3.14159f);
+                ImGui::SliderFloat("Light pitch", &lightPitch, -1.5f, 1.5f);
 
                 ImGui::Separator();
                 const MemoryBudget budget = device->queryMemoryBudget();
@@ -372,12 +367,12 @@ namespace dmrender
             }
             ImGui::Render();
 
-            // ── Матрицы ──
+            // ── Matrices ──
             const float aspect = static_cast<float>(fbWidth) / static_cast<float>(fbHeight);
-            const Mat4 projection = perspective(1.0472f /* 60° */, aspect, 0.05f, 100.0f);
+            const Mat4 projection = perspective(1.0472f /* 60 deg */, aspect, 0.05f, 100.0f);
             const Mat4 view = translation(0.0f, 0.0f, -distance);
 
-            // Модель: центрируем, нормализуем масштаб, затем вращаем.
+            // Model: recentre, normalise scale, then rotate.
             const Mat4 recenter = translation(-meshCenter[0], -meshCenter[1], -meshCenter[2]);
             const Mat4 model = multiply(rotationY(yaw),
                                 multiply(rotationX(pitch),
@@ -392,13 +387,13 @@ namespace dmrender
             constants.lightDirection[2] = std::cos(lightPitch) * std::cos(lightYaw);
             constants.cameraParams[0] = ambientAmount;
 
-            // ── Проход 1: сцена ──
+            // ── Pass 1: the scene ──
             std::shared_ptr<CommandBuffer> buffer = helper::createCommandBuffer(cmdLists);
 
             std::shared_ptr<RenderPassDescriptor> scenePass = helper::createRenderPassDescriptor();
             if (useMsaa) {
-                // Рисуем в многосэмпловую цель, а проход сводит её в изображение свопчейна
-                // при завершении — отдельной отрисовки это не стоит.
+                // Draw into the multisample target; the pass resolves it into the swapchain
+                // image on completion, which costs no extra draw.
                 scenePass->setColorAttachment(0, msaaColorTarget, true, clearColor);
                 scenePass->setResolveAttachment(0, nextImgToDraw);
                 scenePass->setDepthStencilAttachment(msaaDepthTarget, true, 1.0f, false, 0);
@@ -412,8 +407,8 @@ namespace dmrender
                 buffer->setRenderPipeline(useMsaa ? meshPipelineMSAA : meshPipeline);
                 buffer->setVertexBuffer(0, vertexBuffer);
 
-                // Один буфер геометрии, по подмножеству на материал: смена материала стоит
-                // записи push-констант, а не пересвязывания буферов.
+                // One geometry buffer, one subset per material: switching material costs a push
+                // constant write rather than rebinding buffers.
                 for (const MeshSubset& subset : mesh.subsets) {
                     const MeshMaterial* material =
                         (subset.materialIndex >= 0 &&
@@ -429,7 +424,8 @@ namespace dmrender
                         constants.baseColor[1] = 0.76f;
                         constants.baseColor[2] = 0.72f;
                     }
-                    // Текстур у загруженной модели нет — сообщаем шейдеру, что умножать не на что.
+                    // The loaded model has no textures — tell the shader there is nothing to
+                    // multiply by.
                     constants.baseColor[3] = 0.0f;
 
                     buffer->setTexture(0, ShaderStage::Fragment, whiteTexture, sampler);
@@ -443,8 +439,8 @@ namespace dmrender
             }
             buffer->endRenderPass();
 
-            // ── Проход 2: интерфейс поверх готового кадра ──
-            // Без очистки: загружаем то, что оставил проход сцены.
+            // ── Pass 2: the interface, over the finished frame ──
+            // No clear: load whatever the scene pass left behind.
             buffer->beginRenderPass(uiPass);
             {
                 helper::renderInternalImgui(buffer);
