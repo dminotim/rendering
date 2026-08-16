@@ -232,6 +232,62 @@ namespace dmrender {
     }
 
 
+    void MetalCommandBuffer::drawIndirect(const std::shared_ptr<GBuffer>& argumentBuffer,
+                                          uint32_t drawCount,
+                                          size_t offset,
+                                          uint32_t stride)
+    {
+        assert(m_data->m_encoder != nil && "No active render pass.");
+        if (!argumentBuffer || drawCount == 0) return;
+        if (argumentBuffer->type() != BufferType::Indirect) {
+            NSLog(@"[ERROR] drawIndirect: argument buffer must be BufferType::Indirect");
+            return;
+        }
+
+        auto mtlArguments = (__bridge id<MTLBuffer>)argumentBuffer->nativeHandle();
+        const NSUInteger effectiveStride = (stride != 0) ? stride : sizeof(DrawIndirectCommand);
+
+        // Metal's indirect draw executes exactly one command, so multiple draws mean multiple
+        // calls. The Vulkan backend can collapse them when multiDrawIndirect is available; the
+        // draws issued are identical either way.
+        for (uint32_t i = 0; i < drawCount; ++i) {
+            [m_data->m_encoder drawPrimitives:MTLPrimitiveTypeTriangle
+                               indirectBuffer:mtlArguments
+                         indirectBufferOffset:offset + i * effectiveStride];
+        }
+    }
+
+    void MetalCommandBuffer::drawIndexedIndirect(const std::shared_ptr<GBuffer>& indexBuffer,
+                                                 IndexType indexType,
+                                                 const std::shared_ptr<GBuffer>& argumentBuffer,
+                                                 uint32_t drawCount,
+                                                 size_t offset,
+                                                 uint32_t stride)
+    {
+        assert(m_data->m_encoder != nil && "No active render pass.");
+        if (!indexBuffer || !argumentBuffer || drawCount == 0) return;
+        if (argumentBuffer->type() != BufferType::Indirect) {
+            NSLog(@"[ERROR] drawIndexedIndirect: argument buffer must be BufferType::Indirect");
+            return;
+        }
+
+        auto mtlIndexBuffer = (__bridge id<MTLBuffer>)indexBuffer->nativeHandle();
+        auto mtlArguments = (__bridge id<MTLBuffer>)argumentBuffer->nativeHandle();
+        const MTLIndexType mtlIndexType =
+            (indexType == IndexType::UInt16) ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
+        const NSUInteger effectiveStride =
+            (stride != 0) ? stride : sizeof(DrawIndexedIndirectCommand);
+
+        for (uint32_t i = 0; i < drawCount; ++i) {
+            [m_data->m_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
+                                           indexType:mtlIndexType
+                                         indexBuffer:mtlIndexBuffer
+                                   indexBufferOffset:0
+                                      indirectBuffer:mtlArguments
+                                indirectBufferOffset:offset + i * effectiveStride];
+        }
+    }
+
     void MetalCommandBuffer::endRenderPass()
     {
         assert(m_data->m_encoder != nil && "endRenderPass() called without an active render pass.");

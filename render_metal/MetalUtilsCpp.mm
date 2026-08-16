@@ -23,6 +23,25 @@ namespace dmrender {
             case ImageFormat::D16_UNORM:
                 return MTLPixelFormatDepth16Unorm;
 
+            // BC is available on macOS but not on Apple Silicon iOS-family GPUs, which use ASTC
+            // instead. MTLPixelFormatBC* simply fails to create a texture there.
+            case ImageFormat::BC1_RGBA_UNORM:
+                return MTLPixelFormatBC1_RGBA;
+            case ImageFormat::BC1_RGBA_SRGB:
+                return MTLPixelFormatBC1_RGBA_sRGB;
+            case ImageFormat::BC3_UNORM:
+                return MTLPixelFormatBC3_RGBA;
+            case ImageFormat::BC3_SRGB:
+                return MTLPixelFormatBC3_RGBA_sRGB;
+            case ImageFormat::BC4_UNORM:
+                return MTLPixelFormatBC4_RUnorm;
+            case ImageFormat::BC5_UNORM:
+                return MTLPixelFormatBC5_RGUnorm;
+            case ImageFormat::BC7_UNORM:
+                return MTLPixelFormatBC7_RGBAUnorm;
+            case ImageFormat::BC7_SRGB:
+                return MTLPixelFormatBC7_RGBAUnorm_sRGB;
+
             case ImageFormat::Undefined:
             default:
                 return MTLPixelFormatInvalid;
@@ -39,13 +58,19 @@ namespace dmrender {
         return flags;
     }
 
-    MTLTextureType ToMTLTextureType(ImageType type) {
+    MTLTextureType ToMTLTextureType(ImageType type, uint32_t arrayLayers) {
         switch (type) {
-            case ImageType::Image1D: return MTLTextureType1D;
-            case ImageType::Image3D: return MTLTextureType3D;
-            case ImageType::CubeMap: return MTLTextureTypeCube;
+            case ImageType::Image1D:
+                return arrayLayers > 1 ? MTLTextureType1DArray : MTLTextureType1D;
+            case ImageType::Image3D:
+                // A 3D texture is never an array; its slices are addressed by the third
+                // texture coordinate rather than by a layer index.
+                return MTLTextureType3D;
+            case ImageType::CubeMap:
+                return MTLTextureTypeCube;
             case ImageType::Image2D:
-            default:                 return MTLTextureType2D;
+            default:
+                return arrayLayers > 1 ? MTLTextureType2DArray : MTLTextureType2D;
         }
     }
 

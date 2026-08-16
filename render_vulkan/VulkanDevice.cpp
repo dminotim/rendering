@@ -24,6 +24,8 @@ namespace dmrender {
         VkPhysicalDeviceProperties properties{};
         VkPhysicalDeviceMemoryProperties memoryProperties{};
         bool memoryBudgetExtension = false;
+        bool textureCompressionBC = false;
+        bool multiDrawIndirect = false;
         std::unique_ptr<VulkanMemoryAllocator> allocator;
 
         // --- Transfer context: everything needed to push data into device-local memory ---
@@ -547,6 +549,16 @@ namespace dmrender {
         return *m_data->allocator;
     }
 
+    bool VulkanDevice::supportsTextureCompressionBC() const
+    {
+        return m_data->textureCompressionBC;
+    }
+
+    bool VulkanDevice::supportsMultiDrawIndirect() const
+    {
+        return m_data->multiDrawIndirect;
+    }
+
     MemoryBudget VulkanDevice::queryMemoryBudget() const
     {
         MemoryBudget budget{};
@@ -757,7 +769,9 @@ namespace dmrender {
                               VkAccessFlags srcAccess,
                               VkAccessFlags dstAccess,
                               VkPipelineStageFlags srcStage,
-                              VkPipelineStageFlags dstStage)
+                              VkPipelineStageFlags dstStage,
+                              uint32_t baseArrayLayer = 0,
+                              uint32_t layerCount = 1)
         {
             VkImageMemoryBarrier barrier{};
             barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
@@ -769,8 +783,8 @@ namespace dmrender {
             barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             barrier.subresourceRange.baseMipLevel = baseMipLevel;
             barrier.subresourceRange.levelCount = levelCount;
-            barrier.subresourceRange.baseArrayLayer = 0;
-            barrier.subresourceRange.layerCount = 1;
+            barrier.subresourceRange.baseArrayLayer = baseArrayLayer;
+            barrier.subresourceRange.layerCount = layerCount;
             barrier.srcAccessMask = srcAccess;
             barrier.dstAccessMask = dstAccess;
 
@@ -782,7 +796,9 @@ namespace dmrender {
     void VulkanDevice::uploadToImage(VkImage image,
                                      uint32_t width,
                                      uint32_t height,
+                                     uint32_t depth,
                                      uint32_t mipLevel,
+                                     uint32_t arrayLayer,
                                      const void* data,
                                      VkDeviceSize size,
                                      VkImageLayout finalLayout)
@@ -795,11 +811,12 @@ namespace dmrender {
         VkCommandBuffer cmd = beginTransferCommands();
 
         // UNDEFINED as the old layout discards whatever was there, which is correct because the
-        // copy below overwrites the entire level.
+        // copy below overwrites the entire level of this layer.
         transitionLevels(cmd, image, mipLevel, 1,
                          VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                          0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                         VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         arrayLayer, 1);
 
         VkBufferImageCopy region{};
         region.bufferOffset = 0;
@@ -807,10 +824,12 @@ namespace dmrender {
         region.bufferImageHeight = 0;
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.mipLevel = mipLevel;
-        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.baseArrayLayer = arrayLayer;
         region.imageSubresource.layerCount = 1;
         region.imageOffset = { 0, 0, 0 };
-        region.imageExtent = { width, height, 1 };
+        // A volume copies every slice in one go; a 2D or array image has depth 1 and the layer
+        // above selects which image is written.
+        region.imageExtent = { width, height, depth };
 
         vkCmdCopyBufferToImage(cmd, m_data->stagingBuffer, image,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -818,7 +837,8 @@ namespace dmrender {
         transitionLevels(cmd, image, mipLevel, 1,
                          VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, finalLayout,
                          VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         arrayLayer, 1);
 
         endTransferCommands();
     }
@@ -826,7 +846,9 @@ namespace dmrender {
     void VulkanDevice::readbackFromImage(VkImage image,
                                          uint32_t width,
                                          uint32_t height,
+                                         uint32_t depth,
                                          uint32_t mipLevel,
+                                         uint32_t arrayLayer,
                                          void* destination,
                                          VkDeviceSize size,
                                          VkImageLayout currentLayout)
@@ -842,7 +864,8 @@ namespace dmrender {
         transitionLevels(cmd, image, mipLevel, 1,
                          currentLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                          VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         arrayLayer, 1);
 
         VkBufferImageCopy region{};
         region.bufferOffset = 0;
@@ -850,10 +873,10 @@ namespace dmrender {
         region.bufferImageHeight = 0;
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.mipLevel = mipLevel;
-        region.imageSubresource.baseArrayLayer = 0;
+        region.imageSubresource.baseArrayLayer = arrayLayer;
         region.imageSubresource.layerCount = 1;
         region.imageOffset = { 0, 0, 0 };
-        region.imageExtent = { width, height, 1 };
+        region.imageExtent = { width, height, depth };
 
         vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                m_data->stagingBuffer, 1, &region);
@@ -862,7 +885,8 @@ namespace dmrender {
         transitionLevels(cmd, image, mipLevel, 1,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, currentLayout,
                          VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         arrayLayer, 1);
 
         endTransferCommands();
 
@@ -896,7 +920,9 @@ namespace dmrender {
                                        VkFormat format,
                                        uint32_t width,
                                        uint32_t height,
+                                       uint32_t depth,
                                        uint32_t mipLevels,
+                                       uint32_t arrayLayers,
                                        VkImageLayout finalLayout)
     {
         if (mipLevels <= 1) return;
@@ -913,36 +939,43 @@ namespace dmrender {
 
         // Level 0 already holds the uploaded image and sits in its resting layout; every other
         // level is undefined. Move level 0 to TRANSFER_SRC so it can seed the chain.
+        // Every layer is downsampled by the same ladder, so all of them move together and one
+        // blit per level covers the whole array — including all six faces of a cubemap.
         transitionLevels(cmd, image, 0, 1,
                          finalLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                          VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, arrayLayers);
 
         int32_t levelWidth = static_cast<int32_t>(width);
         int32_t levelHeight = static_cast<int32_t>(height);
+        int32_t levelDepth = static_cast<int32_t>(depth);
 
         for (uint32_t level = 1; level < mipLevels; ++level) {
             const int32_t nextWidth = levelWidth > 1 ? levelWidth / 2 : 1;
             const int32_t nextHeight = levelHeight > 1 ? levelHeight / 2 : 1;
+            // A volume's mip chain shrinks in three dimensions; a 2D image keeps depth at 1.
+            const int32_t nextDepth = levelDepth > 1 ? levelDepth / 2 : 1;
 
             transitionLevels(cmd, image, level, 1,
                              VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                              0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                             VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, arrayLayers);
 
             VkImageBlit blit{};
             blit.srcOffsets[0] = { 0, 0, 0 };
-            blit.srcOffsets[1] = { levelWidth, levelHeight, 1 };
+            blit.srcOffsets[1] = { levelWidth, levelHeight, levelDepth };
             blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             blit.srcSubresource.mipLevel = level - 1;
             blit.srcSubresource.baseArrayLayer = 0;
-            blit.srcSubresource.layerCount = 1;
+            blit.srcSubresource.layerCount = arrayLayers;
             blit.dstOffsets[0] = { 0, 0, 0 };
-            blit.dstOffsets[1] = { nextWidth, nextHeight, 1 };
+            blit.dstOffsets[1] = { nextWidth, nextHeight, nextDepth };
             blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
             blit.dstSubresource.mipLevel = level;
             blit.dstSubresource.baseArrayLayer = 0;
-            blit.dstSubresource.layerCount = 1;
+            blit.dstSubresource.layerCount = arrayLayers;
 
             vkCmdBlitImage(cmd,
                            image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -953,17 +986,20 @@ namespace dmrender {
             transitionLevels(cmd, image, level, 1,
                              VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                              VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
-                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             0, arrayLayers);
 
             levelWidth = nextWidth;
             levelHeight = nextHeight;
+            levelDepth = nextDepth;
         }
 
         // Every level is now TRANSFER_SRC; put the whole chain back into its resting layout.
         transitionLevels(cmd, image, 0, mipLevels,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, finalLayout,
                          VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
-                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, arrayLayers);
 
         endTransferCommands();
     }
@@ -1012,7 +1048,23 @@ namespace dmrender {
             }
         }
 
+        // Features are opt-in and must be requested at device creation. Everything here is
+        // universally available on desktop hardware, but ask rather than assume — a missing
+        // feature is a device-creation failure, not a graceful degradation.
+        VkPhysicalDeviceFeatures supportedFeatures{};
+        vkGetPhysicalDeviceFeatures(m_data->physicalDevice, &supportedFeatures);
+
         VkPhysicalDeviceFeatures deviceFeatures{};
+        deviceFeatures.textureCompressionBC = supportedFeatures.textureCompressionBC;
+        // Lets one vkCmdDrawIndexedIndirect issue many draws. Without it the backend falls back
+        // to one call per draw, which still works but loses most of the point.
+        deviceFeatures.multiDrawIndirect = supportedFeatures.multiDrawIndirect;
+        // Allows a non-zero firstInstance in indirect draw arguments.
+        deviceFeatures.drawIndirectFirstInstance = supportedFeatures.drawIndirectFirstInstance;
+
+        m_data->textureCompressionBC = supportedFeatures.textureCompressionBC == VK_TRUE;
+        m_data->multiDrawIndirect = supportedFeatures.multiDrawIndirect == VK_TRUE;
+
         VkDeviceCreateInfo createInfo{};
         createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         createInfo.queueCreateInfoCount = static_cast<uint32_t>(queueCreateInfos.size());

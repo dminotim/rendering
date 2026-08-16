@@ -77,13 +77,21 @@ public:
      * @param mipLevel Which level to write.
      * @param data Tightly packed pixels.
      * @param size Size of @p data in bytes.
+     * @param bytesPerRow Distance between rows. For a compressed format this is a row of
+     *                    *blocks*, covering four texel rows, so it cannot be derived from
+     *                    size and height alone.
+     * @param bytesPerImage Distance between depth slices; equals @p size for a 2D image.
      */
     void uploadToPrivateTexture(void* destination,
                                 uint32_t width,
                                 uint32_t height,
+                                uint32_t depth,
                                 uint32_t mipLevel,
+                                uint32_t arrayLayer,
                                 const void* data,
-                                size_t size) const;
+                                size_t size,
+                                size_t bytesPerRow,
+                                size_t bytesPerImage) const;
 
     /**
      * @brief Fills levels 1..n-1 of a texture from level 0.
@@ -107,9 +115,13 @@ public:
     void readbackFromPrivateTexture(void* source,
                                     uint32_t width,
                                     uint32_t height,
+                                    uint32_t depth,
                                     uint32_t mipLevel,
+                                    uint32_t arrayLayer,
                                     void* destination,
-                                    size_t size) const;
+                                    size_t size,
+                                    size_t bytesPerRow,
+                                    size_t bytesPerImage) const;
 
     /// @brief Copies a range of a private-storage buffer back into CPU memory.
     void readbackFromPrivateBuffer(void* source,

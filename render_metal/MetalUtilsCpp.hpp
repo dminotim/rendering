@@ -31,7 +31,8 @@ namespace dmrender {
     MTLTextureUsage ToMTLTextureUsage(ImageUsage usage);
 
     /// @brief Converts an abstract image type to its Metal texture type.
-    MTLTextureType ToMTLTextureType(ImageType type);
+    /// @param arrayLayers Layer count; above 1 this selects the array variant of the type.
+    MTLTextureType ToMTLTextureType(ImageType type, uint32_t arrayLayers = 1);
 
     MTLSamplerMinMagFilter ToMTLSamplerMinMagFilter(SamplerFilter filter);
 

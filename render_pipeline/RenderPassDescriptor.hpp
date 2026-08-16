@@ -37,11 +37,15 @@ namespace dmrender {
          * @param clear A boolean flag indicating whether the attachment should be cleared
          *              at the beginning of the render pass.
          * @param clearValue The color value to use for clearing if 'clear' is true.
+         * @param arrayLayer Which layer of an array or cubemap image to render into. This is how
+         *                   a cubemap is filled a face at a time and how a shadow cascade
+         *                   renders into its own slice. Must be 0 for non-array images.
          */
         virtual void setColorAttachment(uint32_t index,
                                         const std::shared_ptr<GImage>& image,
                                         bool clear,
-                                        const ClearValue& clearValue) = 0;
+                                        const ClearValue& clearValue,
+                                        uint32_t arrayLayer = 0) = 0;
 
         /**
          * @brief The number of colour attachments configured so far.
@@ -82,7 +86,8 @@ namespace dmrender {
                                                bool clearDepth,
                                                float depthValue,
                                                bool clearStencil,
-                                               uint32_t stencilValue) = 0;
+                                               uint32_t stencilValue,
+                                               uint32_t arrayLayer = 0) = 0;
 
         /**
          * @brief Retrieves the native, backend-specific handle for the descriptor.

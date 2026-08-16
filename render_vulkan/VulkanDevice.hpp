@@ -195,7 +195,9 @@ namespace dmrender {
         void uploadToImage(VkImage image,
                            uint32_t width,
                            uint32_t height,
+                           uint32_t depth,
                            uint32_t mipLevel,
+                           uint32_t arrayLayer,
                            const void* data,
                            VkDeviceSize size,
                            VkImageLayout finalLayout);
@@ -210,7 +212,9 @@ namespace dmrender {
                              VkFormat format,
                              uint32_t width,
                              uint32_t height,
+                             uint32_t depth,
                              uint32_t mipLevels,
+                             uint32_t arrayLayers,
                              VkImageLayout finalLayout);
 
         /**
@@ -230,7 +234,9 @@ namespace dmrender {
         void readbackFromImage(VkImage image,
                                uint32_t width,
                                uint32_t height,
+                               uint32_t depth,
                                uint32_t mipLevel,
+                               uint32_t arrayLayer,
                                void* destination,
                                VkDeviceSize size,
                                VkImageLayout currentLayout);
@@ -257,6 +263,12 @@ namespace dmrender {
          * directly, because drivers cap the number of allocations a process may make.
          */
         VulkanMemoryAllocator& allocator() const;
+
+        /// @brief True when the device supports BC block-compressed texture formats.
+        bool supportsTextureCompressionBC() const;
+
+        /// @brief True when one indirect draw call can issue more than one draw.
+        bool supportsMultiDrawIndirect() const;
 
         /**
          * @brief Index of the frame slot currently being recorded, in [0, kFramesInFlight).

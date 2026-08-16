@@ -142,6 +142,8 @@ if(WIN32)
             "CompositeMRT.frag:composite_fragment_shader_mrt:Composite"
             "Overlay.vert:overlay_vertex_shader:Overlay"
             "Overlay.frag:overlay_fragment_shader:Overlay"
+            "Cube.vert:cube_vertex_shader:Cube"
+            "Cube.frag:cube_fragment_shader:Cube"
     )
 
     set(SPIRV_OUTPUTS "")
@@ -178,6 +180,8 @@ if(WIN32)
             shaders/glsl/CompositeMRT.frag
             shaders/glsl/Overlay.vert
             shaders/glsl/Overlay.frag
+            shaders/glsl/Cube.vert
+            shaders/glsl/Cube.frag
     )
     target_sources(${APP_NAME} PRIVATE ${GLSL_SOURCE_FILES})
     set_source_files_properties(${GLSL_SOURCE_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)

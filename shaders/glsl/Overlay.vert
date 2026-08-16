@@ -39,8 +39,7 @@ void main() {
                        vec2(uniforms.centerX, uniforms.centerY),
                        0.0, 1.0);
 
-    // Vulkan's NDC has -1 at the top, and v = 0 is the top texture row, so no flip is needed
-    // here. Overlay.metal has to invert y because Metal's NDC points the other way — the same
-    // divergence documented at length in Composite.vert.
-    outUv = position * 0.5 + 0.5;
+    // Identical to Overlay.metal: clip-space +Y points up on both backends, and v = 0 is the top
+    // texture row on both, so Y inverts here. See Composite.vert.
+    outUv = vec2(position.x * 0.5 + 0.5, 0.5 - position.y * 0.5);
 }

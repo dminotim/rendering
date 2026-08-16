@@ -56,6 +56,13 @@ namespace dmrender {
             int32_t vertexOffset,
             uint32_t firstInstance) override;
 
+        void drawIndirect(const std::shared_ptr<GBuffer>& argumentBuffer,
+                          uint32_t drawCount, size_t offset = 0, uint32_t stride = 0) override;
+        void drawIndexedIndirect(const std::shared_ptr<GBuffer>& indexBuffer,
+                                 IndexType indexType,
+                                 const std::shared_ptr<GBuffer>& argumentBuffer,
+                                 uint32_t drawCount, size_t offset = 0, uint32_t stride = 0) override;
+
         void endRenderPass() override;
 
         void present(const std::shared_ptr<GImage>& image) override;

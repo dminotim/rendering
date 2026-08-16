@@ -226,9 +226,13 @@ namespace dmrender
     void MetalDevice::uploadToPrivateTexture(void* destination,
                                              uint32_t width,
                                              uint32_t height,
+                                             uint32_t depth,
                                              uint32_t mipLevel,
+                                             uint32_t arrayLayer,
                                              const void* data,
-                                             size_t size) const {
+                                             size_t size,
+                                             size_t bytesPerRow,
+                                             size_t bytesPerImage) const {
         if (!destination || !data || size == 0) return;
 
         auto mtlTexture = (__bridge id<MTLTexture>)destination;
@@ -236,17 +240,15 @@ namespace dmrender
 
         memcpy([m_data->m_stagingBuffer contents], data, size);
 
-        const NSUInteger bytesPerRow = size / height;
-
         id<MTLCommandBuffer> commandBuffer = [m_data->m_transferQueue commandBuffer];
         id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
         [blit copyFromBuffer:m_data->m_stagingBuffer
                 sourceOffset:0
            sourceBytesPerRow:bytesPerRow
-         sourceBytesPerImage:size
-                  sourceSize:MTLSizeMake(width, height, 1)
+         sourceBytesPerImage:bytesPerImage
+                  sourceSize:MTLSizeMake(width, height, depth)
                    toTexture:mtlTexture
-            destinationSlice:0
+            destinationSlice:arrayLayer
             destinationLevel:mipLevel
            destinationOrigin:MTLOriginMake(0, 0, 0)];
         [blit endEncoding];
@@ -273,27 +275,29 @@ namespace dmrender
     void MetalDevice::readbackFromPrivateTexture(void* source,
                                                  uint32_t width,
                                                  uint32_t height,
+                                                 uint32_t depth,
                                                  uint32_t mipLevel,
+                                                 uint32_t arrayLayer,
                                                  void* destination,
-                                                 size_t size) const {
+                                                 size_t size,
+                                                 size_t bytesPerRow,
+                                                 size_t bytesPerImage) const {
         if (!source || !destination || size == 0) return;
 
         auto mtlSource = (__bridge id<MTLTexture>)source;
         ensureTransferResources(size);
 
-        const NSUInteger bytesPerRow = size / height;
-
         id<MTLCommandBuffer> commandBuffer = [m_data->m_transferQueue commandBuffer];
         id<MTLBlitCommandEncoder> blit = [commandBuffer blitCommandEncoder];
         [blit copyFromTexture:mtlSource
-                  sourceSlice:0
+                  sourceSlice:arrayLayer
                   sourceLevel:mipLevel
                  sourceOrigin:MTLOriginMake(0, 0, 0)
-                   sourceSize:MTLSizeMake(width, height, 1)
+                   sourceSize:MTLSizeMake(width, height, depth)
                      toBuffer:m_data->m_stagingBuffer
             destinationOffset:0
        destinationBytesPerRow:bytesPerRow
-     destinationBytesPerImage:size];
+     destinationBytesPerImage:bytesPerImage];
         [blit endEncoding];
         [commandBuffer commit];
         [commandBuffer waitUntilCompleted];

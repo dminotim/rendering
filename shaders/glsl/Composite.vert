@@ -22,22 +22,13 @@ void main() {
 
     // NDC (-1..1) to texture coordinates (0..1).
     //
-    // This is the one line where the GLSL and the MSL genuinely have to differ, so it is worth
-    // being explicit about why. The two APIs disagree on the sign of NDC Y:
+    // Identical to the expression in Composite.metal, and deliberately so: the Vulkan backend
+    // renders with a flipped viewport so that +Y points up in clip space, exactly as it does on
+    // Metal. Y is inverted here because both APIs place v = 0 at the *top* texture row while
+    // clip-space +Y points at the top of the screen.
     //
-    //   Vulkan  ndc.y = -1 is the TOP of the viewport
-    //   Metal   ndc.y = +1 is the TOP of the viewport
-    //
-    // Both sample textures with v = 0 at the top row, and both give the fragment stage a
-    // framebuffer position with its origin at the top-left — which is why PlaneShader.frag needs
-    // no adjustment at all. Only code converting a *clip space* position into a texture
-    // coordinate has to care, and it does so in opposite directions:
-    //
-    //   here (Vulkan)      uv.y = position.y * 0.5 + 0.5
-    //   Composite.metal    uv.y = 0.5 - position.y * 0.5
-    //
-    // Copying the MSL expression into this file would flip the composited image vertically —
-    // and, because the grid is periodic, would look almost right while placing every pan offset
-    // and the distance-field target upside down.
-    outUv = position * 0.5 + 0.5;
+    // This file used to carry the opposite expression, back when the backends disagreed about
+    // the sign of clip-space Y. If you ever find yourself needing to differ from the MSL again,
+    // the convention has been broken somewhere rather than the shader being wrong.
+    outUv = vec2(position.x * 0.5 + 0.5, 0.5 - position.y * 0.5);
 }

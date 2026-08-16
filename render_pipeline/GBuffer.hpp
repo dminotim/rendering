@@ -19,8 +19,46 @@ namespace dmrender {
     enum class BufferType {
         Vertex,  ///< The buffer will store vertex data.
         Index,   ///< The buffer will store index data.
-        Uniform  ///< The buffer will store uniform data (constants).
-        // Storage, // For future use with compute shaders
+        Uniform, ///< The buffer will store uniform data (constants).
+
+        /**
+         * @brief The buffer will hold draw arguments read by the GPU.
+         *
+         * Used with CommandBuffer::drawIndirect() and drawIndexedIndirect(). Filling it from the
+         * CPU is already useful — one call issues many draws — and it is the mechanism a compute
+         * shader would later use to build a draw list without the CPU seeing it at all.
+         */
+        Indirect
+    };
+
+    /**
+     * @struct DrawIndirectCommand
+     * @brief Arguments for one non-indexed draw, as the GPU reads them.
+     *
+     * The layout is fixed by both APIs and happens to be identical between them
+     * (VkDrawIndirectCommand and MTLDrawPrimitivesIndirectArguments), so this struct can be
+     * written straight into an Indirect buffer with no per-backend translation.
+     */
+    struct DrawIndirectCommand {
+        uint32_t vertexCount = 0;
+        uint32_t instanceCount = 0;
+        uint32_t firstVertex = 0;
+        uint32_t firstInstance = 0;
+    };
+
+    /**
+     * @struct DrawIndexedIndirectCommand
+     * @brief Arguments for one indexed draw, as the GPU reads them.
+     *
+     * Matches VkDrawIndexedIndirectCommand and MTLDrawIndexedPrimitivesIndirectArguments field
+     * for field, including the signed vertex offset.
+     */
+    struct DrawIndexedIndirectCommand {
+        uint32_t indexCount = 0;
+        uint32_t instanceCount = 0;
+        uint32_t firstIndex = 0;
+        int32_t vertexOffset = 0;
+        uint32_t firstInstance = 0;
     };
 
     /**

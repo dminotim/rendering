@@ -25,13 +25,17 @@ namespace dmrender {
     void MetalRenderPassDescriptor::setColorAttachment(uint32_t index,
                                                        const std::shared_ptr<GImage>& image,
                                                        bool clear,
-                                                       const ClearValue& clearValue) {
+                                                       const ClearValue& clearValue,
+                                                       uint32_t arrayLayer) {
         if (index >= kMaxColorAttachments) {
             NSLog(@"[ERROR] MetalRenderPassDescriptor: colour attachment index is out of range");
             return;
         }
 
         auto* attachment = m_data->m_pass.colorAttachments[index];
+        // `slice` picks one layer of an array or one face of a cubemap. Vulkan expresses the
+        // same thing with a single-layer image view; here it is a property of the attachment.
+        attachment.slice = arrayLayer;
 
         auto* metalImage = static_cast<MetalImage*>(image.get());
         id<MTLTexture> tex = (__bridge id<MTLTexture>)metalImage->nativeHandle();
@@ -71,13 +75,15 @@ namespace dmrender {
                                                               bool clearDepth,
                                                               float depthValue,
                                                               bool clearStencil,
-                                                              uint32_t stencilValue) {
+                                                              uint32_t stencilValue,
+                                                              uint32_t arrayLayer) {
 
         auto* metalImage = static_cast<MetalImage*>(image.get());
         id<MTLTexture> tex = (__bridge id<MTLTexture>)metalImage->nativeHandle();
 
         auto* depth = m_data->m_pass.depthAttachment;
         depth.texture = tex;
+        depth.slice = arrayLayer;
         depth.loadAction = clearDepth ? MTLLoadActionClear : MTLLoadActionLoad;
         depth.storeAction = MTLStoreActionStore;
         depth.clearDepth = depthValue;

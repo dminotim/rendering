@@ -28,7 +28,8 @@ namespace dmrender {
     void VulkanRenderPassDescriptor::setColorAttachment(uint32_t index,
                                                         const std::shared_ptr<GImage>& image,
                                                         bool clear,
-                                                        const ClearValue& clearValue)
+                                                        const ClearValue& clearValue,
+                                                        uint32_t arrayLayer)
     {
         if (index >= kMaxColorAttachments) {
             throw std::runtime_error("VulkanRenderPassDescriptor: colour attachment index is out of range");
@@ -36,6 +37,7 @@ namespace dmrender {
         m_data->colors[index].image = image;
         m_data->colors[index].clear = clear;
         m_data->colors[index].clearValue = clearValue;
+        m_data->colors[index].arrayLayer = arrayLayer;
         m_data->colorCount = std::max(m_data->colorCount, index + 1);
     }
 
@@ -65,12 +67,14 @@ namespace dmrender {
                                                                bool clearDepth,
                                                                float depthValue,
                                                                bool clearStencil,
-                                                               uint32_t stencilValue)
+                                                               uint32_t stencilValue,
+                                                               uint32_t arrayLayer)
     {
         m_data->depthStencil.image = image;
         m_data->depthStencil.clear = clearDepth;
         m_data->depthStencil.clearValue.depth = depthValue;
         m_data->depthStencil.clearValue.stencil = stencilValue;
+        m_data->depthStencil.arrayLayer = arrayLayer;
         m_data->clearStencil = clearStencil;
     }
 

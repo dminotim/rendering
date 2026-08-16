@@ -57,13 +57,17 @@ namespace dmrender {
 
         SampleCount sampleCount() const override;
 
+        uint32_t arrayLayers() const override;
+
         MemoryLocation memoryLocation() const override;
 
-        void update(const void *data, size_t dataSize, uint32_t mipLevel = 0) override;
+        void update(const void *data, size_t dataSize,
+                    uint32_t mipLevel = 0, uint32_t arrayLayer = 0) override;
 
         void generateMipmaps() override;
 
-        void readback(void *destination, size_t destinationSize, uint32_t mipLevel = 0) override;
+        void readback(void *destination, size_t destinationSize,
+                      uint32_t mipLevel = 0, uint32_t arrayLayer = 0) override;
 
         void *nativeHandle() const override;
 
@@ -75,12 +79,17 @@ namespace dmrender {
 
 
     private:
+        /// @brief Bytes one update()/readback() call covers for @p mipLevel. See GImage::update().
+        size_t levelByteSize(uint32_t mipLevel) const;
+
         id <CAMetalDrawable> m_drawable = nil;
         id <MTLTexture> m_texture = nil;
         ImageFormat m_format;
         ImageUsage m_usage;
         ImageType m_type;
         uint32_t m_mipLevels = 1;
+        uint32_t m_depth = 1;
+        uint32_t m_arrayLayers = 1;
         SampleCount m_sampleCount = SampleCount::One;
         Device* m_device = nullptr;   ///< Set only for textures this object owns.
         std::string m_debugName;

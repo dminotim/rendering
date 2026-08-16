@@ -46,6 +46,10 @@ namespace dmrender {
                     return VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
                 case BufferType::Uniform:
                     return VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT;
+                case BufferType::Indirect:
+                    // STORAGE_BUFFER as well, so a compute shader could later fill the draw list
+                    // in place without the buffer needing to be recreated.
+                    return VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
             }
             return 0;
         }
