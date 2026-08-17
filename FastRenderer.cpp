@@ -999,13 +999,60 @@ namespace dmrender
 
         // ── Scene-dependent defaults ──
         Camera camera;
+        /**
+         * @brief An explicit starting viewpoint, from DMRENDER_VIEW=x,y,z[,yaw,pitch] in metres.
+         *
+         * The default framing puts the camera outside the bounding box looking in, which suits a
+         * single model and fails for anything else. A converted layout is the clear case: this
+         * scene's bounds span the saloon *and* a row of display props thirty metres away, so the
+         * midpoint of the box is a spot with nothing in it, and the speed derived from the extent
+         * crosses the whole room in a fifth of a second.
+         *
+         * Absolute metres rather than fractions of the bounds so a viewpoint found once keeps
+         * meaning the same place after a prop is added.
+         */
+        struct ViewOverride {
+            bool  set = false;
+            Vec3  position{};
+            float yaw = 0.0f;
+            float pitch = -0.2f;
+        };
+        ViewOverride viewOverride;
+        if (const char* viewText = std::getenv("DMRENDER_VIEW")) {
+            float x = 0.0f, y = 0.0f, z = 0.0f, yaw = 0.0f, pitch = -0.2f;
+            if (std::sscanf(viewText, "%f,%f,%f,%f,%f", &x, &y, &z, &yaw, &pitch) >= 3) {
+                viewOverride.set = true;
+                viewOverride.position = Vec3{ x, y, z };
+                viewOverride.yaw = yaw;
+                viewOverride.pitch = pitch;
+            } else {
+                std::fprintf(stderr,
+                             "DMRENDER_VIEW must be x,y,z[,yaw,pitch] in metres; ignoring '%s'\n",
+                             viewText);
+            }
+        }
+
         auto resetCamera = [&]() {
+            if (viewOverride.set) {
+                camera.position = viewOverride.position;
+                camera.yaw = viewOverride.yaw;
+                camera.pitch = viewOverride.pitch;
+                return;
+            }
             camera.position = sceneCenter + Vec3{ 0.0f, sceneExtent * 0.03f, sceneExtent * 0.30f };
             camera.yaw = 0.0f;
             camera.pitch = -0.05f;
         };
         resetCamera();
-        camera.speed = sceneExtent * 0.15f;
+        // Speed scales with the scene so a ten-million-triangle courtyard is crossable, but an
+        // explicit viewpoint means the caller is standing somewhere particular — and a speed
+        // derived from a 70-metre bounding box crosses a room before the key is released. Walking
+        // pace is the useful default there; the slider and Shift/Ctrl cover the rest.
+        camera.speed = viewOverride.set ? 2.0f : sceneExtent * 0.15f;
+        std::fprintf(stderr, "Camera: (%.2f %.2f %.2f) yaw %.2f pitch %.2f, speed %.2f m/s%s\n",
+                     camera.position.x, camera.position.y, camera.position.z,
+                     camera.yaw, camera.pitch, camera.speed,
+                     viewOverride.set ? " (DMRENDER_VIEW)" : "");
 
         // Near matters far more than far for depth precision, so it is set generously and the
         // reverse-Z distribution absorbs the rest.
@@ -1451,6 +1498,14 @@ namespace dmrender
         // The target is a private image rather than a swapchain image: swapchain images cannot
         // be read back, and a plain one can carry TransferSrc.
         if (const char* shotPrefix = std::getenv("DMRENDER_SCREENSHOT")) {
+            // Said out loud because the alternative is a mystery. These are environment
+            // variables, so they outlive the command that set them: a shell that ran a capture
+            // an hour ago still has this set, and the next run writes PNGs and exits instead of
+            // opening a window, with nothing on screen to explain why.
+            std::fprintf(stderr,
+                         "Capture mode: DMRENDER_SCREENSHOT=%s — writing PNGs and exiting.\n"
+                         "  Unset it to open an interactive window instead.\n", shotPrefix);
+
             const uint32_t shotWidth = 1600, shotHeight = 900;
 
             ImageDesc colorDesc{};
@@ -1497,7 +1552,7 @@ namespace dmrender
 
             // Poses as fractions of the bounding box, so the same sweep frames any scene.
             struct Pose { const char* name; float fx, fy, fz, yaw, pitch; };
-            const Pose poses[] = {
+            std::vector<Pose> poses = {
                 { "a", 0.50f, 0.10f, 0.85f,  0.00f, -0.05f },
                 { "b", 0.50f, 0.10f, 0.50f,  0.00f, -0.05f },
                 { "c", 0.50f, 0.10f, 0.50f,  1.57f, -0.05f },
@@ -1505,6 +1560,20 @@ namespace dmrender
                 { "e", 0.50f, 0.10f, 0.50f, -1.57f, -0.05f },
                 { "f", 0.50f, 0.45f, 0.90f,  0.00f, -0.45f },
             };
+
+            // The same DMRENDER_VIEW that sets the interactive start position also replaces the
+            // sweep with that one viewpoint, so a framing found by walking around is the framing
+            // the capture uses. Parsed once, above, rather than here as well — two readers of one
+            // variable is how the two paths drift apart.
+            const bool absoluteView = viewOverride.set;
+            if (absoluteView) {
+                poses.assign(1, Pose{ "view",
+                                      viewOverride.position.x,
+                                      viewOverride.position.y,
+                                      viewOverride.position.z,
+                                      viewOverride.yaw,
+                                      viewOverride.pitch });
+            }
 
             std::vector<uint8_t> pixels(static_cast<size_t>(shotWidth) * shotHeight * 4);
             std::vector<uint8_t> rgba(pixels.size());
@@ -1517,11 +1586,13 @@ namespace dmrender
 
             for (const Pose& pose : poses) {
                 Camera shotCamera = camera;
-                shotCamera.position = {
-                    mesh.boundsMin[0] + (mesh.boundsMax[0] - mesh.boundsMin[0]) * pose.fx,
-                    mesh.boundsMin[1] + (mesh.boundsMax[1] - mesh.boundsMin[1]) * pose.fy,
-                    mesh.boundsMin[2] + (mesh.boundsMax[2] - mesh.boundsMin[2]) * pose.fz,
-                };
+                shotCamera.position = absoluteView
+                    ? Vec3{ pose.fx, pose.fy, pose.fz }
+                    : Vec3{
+                        mesh.boundsMin[0] + (mesh.boundsMax[0] - mesh.boundsMin[0]) * pose.fx,
+                        mesh.boundsMin[1] + (mesh.boundsMax[1] - mesh.boundsMin[1]) * pose.fy,
+                        mesh.boundsMin[2] + (mesh.boundsMax[2] - mesh.boundsMin[2]) * pose.fz,
+                    };
                 shotCamera.yaw = pose.yaw;
                 shotCamera.pitch = pose.pitch;
 
@@ -1670,6 +1741,13 @@ namespace dmrender
         int framesRemaining = 0;
         if (const char* framesText = std::getenv("DMRENDER_FRAMES")) {
             framesRemaining = std::atoi(framesText);
+            if (framesRemaining > 0) {
+                // Same trap as DMRENDER_SCREENSHOT: left set in a shell, it closes the window a
+                // second after it opens and looks like a crash.
+                std::fprintf(stderr,
+                             "DMRENDER_FRAMES=%d — the window will close after %d frames.\n",
+                             framesRemaining, framesRemaining);
+            }
         }
 
         while (!glfwWindowShouldClose(window))

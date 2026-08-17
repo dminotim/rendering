@@ -49,6 +49,9 @@ namespace dmrender {
     /// @brief Packs a unit normal into two signed 16-bit values via the octahedron mapping.
     uint32_t packNormal(float x, float y, float z);
 
+    /// @brief Recovers a unit normal from packNormal(), for transforming already-packed geometry.
+    void unpackNormal(uint32_t packed, float out[3]);
+
     /**
      * @enum MaterialBlendMode
      * @brief How a material's coverage is resolved, which decides when it is drawn.
@@ -164,11 +167,29 @@ namespace dmrender {
 
     /**
      * @brief Loads a model, dispatching on file extension.
-     * @param path The .obj, .stl or .ply file.
+     * @param path The .obj, .stl, .ply or .fbx file.
      * @param[out] error Human-readable reason on failure.
      * @return The loaded mesh, or an empty one on failure.
      */
     Mesh loadMesh(const std::filesystem::path& path, std::string& error);
+
+    /**
+     * @brief Reads a binary FBX. Defined in FbxLoader.cpp.
+     *
+     * Separate from the other readers because FBX is a container rather than a geometry format:
+     * the parser that gets to the vertices is most of the file, and none of it is shared with the
+     * line-oriented readers in Mesh.cpp.
+     */
+    bool loadFbx(const std::filesystem::path& path, Mesh& mesh, std::string& error);
+
+    /**
+     * @brief Reads a `.dmscene` kit layout. Defined in SceneKit.cpp.
+     *
+     * Asset kits ship every prop at the origin with no placement data, so the arrangement has to
+     * come from somewhere: this reads a small hand-editable text file naming assets, positions
+     * and yaws, and merges the referenced models into one mesh.
+     */
+    bool loadScene(const std::filesystem::path& path, Mesh& mesh, std::string& error);
 
     // ─────────────────────────────────────────────────────────────────────────
     // Binary cache
