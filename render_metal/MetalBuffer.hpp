@@ -46,6 +46,18 @@ namespace dmrender {
         const std::string& debugName() const override;
         void setDebugName(const std::string& name) override;
 
+        /**
+         * @brief Byte offset of the region the GPU should read for the frame being recorded.
+         *
+         * A @c BufferUsage::Dynamic buffer holds @c kFramesInFlight copies of its contents so the
+         * CPU can write next frame's values while the GPU still reads this frame's. Every place
+         * that binds a buffer has to add this to its own offset, or the shader reads the copy the
+         * CPU is in the middle of overwriting.
+         *
+         * @return 0 for static buffers, `frameSlot * regionStride` for dynamic ones.
+         */
+        size_t currentRegionOffset() const;
+
     private:
         /// @brief Pointer to implementation (PIMPL) to hide Metal-specific details.
          std::unique_ptr<MetalBufferData> m_data;

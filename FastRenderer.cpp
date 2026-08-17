@@ -486,6 +486,9 @@ namespace dmrender
         uint32_t shadowSkipped = 0;
         uint32_t shadowIndirectCalls = 0;
         uint64_t shadowTriangles = 0;
+        /// Commands actually issued after merging neighbours. On a backend without
+        /// multi-draw-indirect this is the number of draw calls the shadow pass costs.
+        uint32_t shadowCommands = 0;
     };
 
     /// Identity of a pipeline variant. Built on demand for the combinations the scene's
@@ -749,6 +752,20 @@ namespace dmrender
         float shadowNormalBias = 1.6f;          ///< In shadow texels.
         float shadowConstantBiasTexels = 0.9f;  ///< Also in texels, converted per cascade.
         float shadowSoftness = 1.0f;            ///< PCF tap spacing, in texels.
+        /**
+         * @brief Casters smaller than this many shadow texels are skipped.
+         *
+         * The geometry a shadow pass submits is the pass's whole cost, and on a tile-based GPU
+         * more so than on an immediate-mode one: every triangle is binned into tiles before any
+         * shading happens, so submitting it is expensive even where it is invisible. Raising this
+         * trades the smallest shadows — cutlery, crockery, door handles — for a proportional cut
+         * in submitted geometry, and is the first knob to reach for when the shadow pass is the
+         * frame's bottleneck.
+         */
+        float shadowCasterCullTexels =
+            std::getenv("DMRENDER_CASTER_CULL")
+                ? std::strtof(std::getenv("DMRENDER_CASTER_CULL"), nullptr)
+                : 1.0f;
 
         const SampleCount maxSamples = device->maxSupportedSampleCount();
         const SampleCount msaaSamples =
@@ -1258,7 +1275,10 @@ namespace dmrender
                     // anyone can see, but it costs a draw call to find that out. San Miguel is
                     // full of cutlery and crockery, and skipping them in the coarse cascades
                     // removes a large share of the pass for no visible change.
-                    if (subset.radius() < cascade.texelWorldSize) { ++stats.shadowSkipped; continue; }
+                    if (subset.radius() < cascade.texelWorldSize * shadowCasterCullTexels) {
+                        ++stats.shadowSkipped;
+                        continue;
+                    }
 
                     if (material && material->blendMode == MaterialBlendMode::Cutout) {
                         list.maskedSubsets.push_back(i);
@@ -1271,7 +1291,26 @@ namespace dmrender
                         command.firstIndex = subset.firstIndex;
                         command.vertexOffset = 0;
                         command.firstInstance = 0;
-                        list.opaque.push_back(command);
+
+                        // Subsets are visited in index-buffer order, so a run of neighbours that
+                        // all survive culling occupies one contiguous range of indices and can be
+                        // drawn as a single command. Worth doing on both backends, but it is not
+                        // a micro-optimisation on Metal: an indirect draw there executes exactly
+                        // one command, so the length of this list is the number of draw calls the
+                        // pass issues. The shadow pipeline binds nothing per subset, which is what
+                        // makes merging legal — the masked casters above cannot be merged for
+                        // exactly that reason, since each needs its own albedo.
+                        bool merged = false;
+                        if (!list.opaque.empty()) {
+                            DrawIndexedIndirectCommand& last = list.opaque.back();
+                            if (last.vertexOffset == command.vertexOffset &&
+                                last.firstInstance == command.firstInstance &&
+                                last.firstIndex + last.indexCount == command.firstIndex) {
+                                last.indexCount += command.indexCount;
+                                merged = true;
+                            }
+                        }
+                        if (!merged) list.opaque.push_back(command);
                     }
 
                     ++stats.shadowDraws;
@@ -1282,6 +1321,7 @@ namespace dmrender
             for (uint32_t c = 0; c < kCascadeCount; ++c) {
                 std::copy(shadowLists[c].opaque.begin(), shadowLists[c].opaque.end(),
                           shadowCommandStaging.begin() + mesh.subsets.size() * c);
+                stats.shadowCommands += static_cast<uint32_t>(shadowLists[c].opaque.size());
             }
             shadowCommands->update(shadowCommandStaging.data(),
                                    shadowCommandStaging.size() *
@@ -1603,8 +1643,9 @@ namespace dmrender
                              shotStats.drawCalls, shotStats.subsetsVisible,
                              shotStats.subsetsVisible + shotStats.subsetsCulled,
                              shotStats.trianglesSubmitted / 1e6);
-                std::fprintf(stderr, " | shadow %u draws %.2f M tris",
-                             shotStats.shadowDraws, shotStats.shadowTriangles / 1e6);
+                std::fprintf(stderr, " | shadow %u casters -> %u commands, %.2f M tris",
+                             shotStats.shadowDraws, shotStats.shadowCommands,
+                             shotStats.shadowTriangles / 1e6);
                 if (benchFrames > 0) {
                     std::fprintf(stderr, " | %.2f ms/frame (%.0f FPS)",
                                  frameMilliseconds, 1000.0 / std::max(frameMilliseconds, 1e-6));
@@ -1719,8 +1760,11 @@ namespace dmrender
                 ImGui::Text("Shadow %u casters (%u too small), %.2f M tris",
                             stats.shadowDraws, stats.shadowSkipped,
                             stats.shadowTriangles / 1e6);
-                ImGui::Text("  %u cascades, %u indirect calls",
-                            kCascadeCount, stats.shadowIndirectCalls);
+                // What a command costs depends on the backend: with multi-draw-indirect the GPU
+                // walks the list itself, without it each command is a separate draw call.
+                ImGui::Text("  %u cascades, %u indirect calls, %u casters merged to %u commands",
+                            kCascadeCount, stats.shadowIndirectCalls,
+                            stats.shadowDraws, stats.shadowCommands);
 
                 ImGui::Separator();
                 ImGui::TextUnformatted("Drag mouse: look   WASD: move   Q/E: down/up");
@@ -1750,6 +1794,10 @@ namespace dmrender
                 ImGui::SliderFloat("Normal bias (texels)", &shadowNormalBias, 0.0f, 6.0f);
                 ImGui::SliderFloat("Constant bias (texels)", &shadowConstantBiasTexels, 0.0f, 4.0f);
                 ImGui::SliderFloat("PCF radius (texels)", &shadowSoftness, 0.25f, 4.0f);
+                ImGui::SliderFloat("Caster cull (texels)", &shadowCasterCullTexels, 0.0f, 8.0f);
+                ImGui::SetItemTooltip("Skips casters smaller than this many shadow texels.\n"
+                                      "The fastest way to cut shadow-pass geometry, which is\n"
+                                      "the whole cost of the pass on a tile-based GPU.");
 
                 ImGui::Separator();
                 if (msaaSamples == SampleCount::One) {

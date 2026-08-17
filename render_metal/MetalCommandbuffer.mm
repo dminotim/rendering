@@ -1,8 +1,11 @@
 #include "MetalCommandbuffer.hpp"
 #import "MetalPipeline.hpp"
+#import "MetalBuffer.hpp"
+#import "MetalCommandQueues.hpp"
 #import "SwapChain.hpp" // Required for context, even if not directly used.
 #import <QuartzCore/CAMetalLayer.h> // Required for id<CAMetalDrawable>
 #import <Metal/Metal.h>
+#import <dispatch/dispatch.h>
 #import <cassert>
 
 namespace dmrender {
@@ -15,7 +18,24 @@ namespace dmrender {
         id<MTLCommandQueue> m_queue = nil;
         id<MTLCommandBuffer> m_commandBuffer = nil;
         id<MTLRenderCommandEncoder> m_encoder = nil;
+        /// Kept alive for the lifetime of the recording so the frame can be closed on commit.
+        std::shared_ptr<MetalCommandQueues> m_owner;
     };
+
+    namespace {
+        /**
+         * @brief Where in @p buffer the region for the frame being recorded starts.
+         *
+         * A dynamic buffer holds one copy per frame in flight, so every binding has to be shifted
+         * by the current region — otherwise the shader reads the copy the CPU is concurrently
+         * overwriting. Static buffers return 0 and are unaffected.
+         */
+        size_t regionOffsetOf(const std::shared_ptr<GBuffer>& buffer)
+        {
+            const auto* metalBuffer = static_cast<const MetalBuffer*>(buffer.get());
+            return metalBuffer ? metalBuffer->currentRegionOffset() : 0;
+        }
+    }
 
 // --- Constructor & Destructor ---
 
@@ -25,6 +45,12 @@ namespace dmrender {
         // The command queue is not retained here, as its lifetime is managed by its C++ wrapper.
         // We are holding a non-owning reference to it.
         m_data->m_queue = (__bridge id<MTLCommandQueue>) cmdQueue->nativeHandle();
+        m_data->m_owner = std::static_pointer_cast<MetalCommandQueues>(cmdQueue);
+
+        // Opens the frame slot, blocking if the GPU is still kFramesInFlight frames behind. This
+        // has to happen before any buffer is written for this frame, which is why it sits in the
+        // constructor: recording cannot start any earlier than this.
+        if (m_data->m_owner) m_data->m_owner->beginFrame();
 
         // Create a new command buffer from the queue.
         // '[... commandBuffer]' returns an autoreleased object. To take ownership and manage its
@@ -98,7 +124,8 @@ namespace dmrender {
         if (!buffer) return;
 
         auto mtlBuf = (__bridge id<MTLBuffer>)buffer->nativeHandle();
-        [m_data->m_encoder setVertexBuffer:mtlBuf offset:offset atIndex:slot];
+        const size_t base = offset + regionOffsetOf(buffer);
+        [m_data->m_encoder setVertexBuffer:mtlBuf offset:base atIndex:slot];
     }
 
     void MetalCommandBuffer::setUniformBuffer(uint32_t slot, ShaderStage stage, const std::shared_ptr<GBuffer>& buffer, size_t offset)
@@ -107,13 +134,14 @@ namespace dmrender {
         if (!buffer) return;
 
         id<MTLBuffer> mtlBuf = (__bridge id<MTLBuffer>)buffer->nativeHandle();
+        const size_t base = offset + regionOffsetOf(buffer);
         switch (stage) {
             case ShaderStage::Vertex:
                 // For uniforms in the vertex stage, Metal uses the same binding command as for vertex buffers.
-                [m_data->m_encoder setVertexBuffer:mtlBuf offset:offset atIndex:slot];
+                [m_data->m_encoder setVertexBuffer:mtlBuf offset:base atIndex:slot];
                 break;
             case ShaderStage::Fragment:
-                [m_data->m_encoder setFragmentBuffer:mtlBuf offset:offset atIndex:slot];
+                [m_data->m_encoder setFragmentBuffer:mtlBuf offset:base atIndex:slot];
                 break;
             case ShaderStage::Compute:
                 // This is an API usage error. A render encoder cannot handle compute stages.
@@ -236,6 +264,7 @@ namespace dmrender {
                                        indexType:mtlIndexType
                                      indexBuffer:mtlIndexBuffer
                                indexBufferOffset:firstIndexOffsetBytes
+                                                 + regionOffsetOf(indexBuffer)
                                    instanceCount:instanceCount
                                       baseVertex:vertexOffset
                                     baseInstance:firstInstance];
@@ -256,6 +285,9 @@ namespace dmrender {
 
         auto mtlArguments = (__bridge id<MTLBuffer>)argumentBuffer->nativeHandle();
         const NSUInteger effectiveStride = (stride != 0) ? stride : sizeof(DrawIndirectCommand);
+        // An indirect argument buffer is typically rebuilt every frame, so it is dynamic and its
+        // commands live in the current region — the GPU may still be reading the other one.
+        const size_t base = offset + regionOffsetOf(argumentBuffer);
 
         // Metal's indirect draw executes exactly one command, so multiple draws mean multiple
         // calls. The Vulkan backend can collapse them when multiDrawIndirect is available; the
@@ -263,7 +295,7 @@ namespace dmrender {
         for (uint32_t i = 0; i < drawCount; ++i) {
             [m_data->m_encoder drawPrimitives:MTLPrimitiveTypeTriangle
                                indirectBuffer:mtlArguments
-                         indirectBufferOffset:offset + i * effectiveStride];
+                         indirectBufferOffset:base + i * effectiveStride];
         }
     }
 
@@ -287,14 +319,16 @@ namespace dmrender {
             (indexType == IndexType::UInt16) ? MTLIndexTypeUInt16 : MTLIndexTypeUInt32;
         const NSUInteger effectiveStride =
             (stride != 0) ? stride : sizeof(DrawIndexedIndirectCommand);
+        const size_t indexBase = regionOffsetOf(indexBuffer);
+        const size_t argumentBase = offset + regionOffsetOf(argumentBuffer);
 
         for (uint32_t i = 0; i < drawCount; ++i) {
             [m_data->m_encoder drawIndexedPrimitives:MTLPrimitiveTypeTriangle
                                            indexType:mtlIndexType
                                          indexBuffer:mtlIndexBuffer
-                                   indexBufferOffset:0
+                                   indexBufferOffset:indexBase
                                       indirectBuffer:mtlArguments
-                                indirectBufferOffset:offset + i * effectiveStride];
+                                indirectBufferOffset:argumentBase + i * effectiveStride];
         }
     }
 
@@ -319,6 +353,22 @@ namespace dmrender {
 
     void MetalCommandBuffer::commit()
     {
+        // Closing the frame returns true exactly once, on the command buffer that ends it. Only
+        // that one carries the completion handler, so the semaphore gets one signal per wait and
+        // its count keeps meaning "frames the GPU has finished".
+        const bool closesFrame = m_data->m_owner && m_data->m_owner->endFrame();
+        if (closesFrame) {
+            // Captured by value: the block retains the semaphore, so the handler stays safe even
+            // if the queue is torn down while this frame is still executing.
+            dispatch_semaphore_t inFlight =
+                    (__bridge dispatch_semaphore_t)m_data->m_owner->frameSemaphore();
+            if (inFlight) {
+                [m_data->m_commandBuffer addCompletedHandler:^(id<MTLCommandBuffer> /*buffer*/) {
+                    dispatch_semaphore_signal(inFlight);
+                }];
+            }
+        }
+
         // Finalize the command buffer and submit it to the queue for execution.
         // After this call, the command buffer can no longer be modified.
         [m_data->m_commandBuffer commit];
