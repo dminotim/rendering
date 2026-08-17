@@ -30,9 +30,25 @@ namespace dmrender {
     }
 
     std::shared_ptr<GImage>  MetalSwapChain::acquireNextImage() {
+        // Opens the frame here rather than leaving it to the command buffer's constructor,
+        // because acquiring is the first thing a frame does and everything a frame uploads —
+        // uniforms, indirect commands — happens between this call and the first command buffer.
+        // Those writes land in the current frame's buffer regions, so the wait that guarantees
+        // the GPU has finished with those regions has to come first. Waiting before taking a
+        // drawable also means the frame is not sitting on one while it blocks.
+        if (auto* queue = static_cast<MetalCommandQueues*>(m_commandQueue.get())) {
+            queue->beginFrame();
+        }
+
         id<CAMetalDrawable> drawable = [m_data->m_layer nextDrawable];
 
         if (!drawable) {
+            // The frame was opened but nothing will be submitted into it, so the permit taken
+            // above has to go back — otherwise every minimised frame leaks one and the pipeline
+            // deadlocks after kFramesInFlight of them.
+            if (auto* queue = static_cast<MetalCommandQueues*>(m_commandQueue.get())) {
+                queue->abandonFrame();
+            }
             return nullptr; // the window may be minimised
         }
         auto metalImg = std::make_shared<MetalImage>(

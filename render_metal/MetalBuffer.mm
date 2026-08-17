@@ -23,7 +23,26 @@ namespace dmrender {
         bool m_isPrivate = false; // GPU-only storage: no `contents`, writes go through a blit.
         MemoryLocation m_location = MemoryLocation::HostVisible;
         const MetalDevice* m_device = nullptr;
+
+        // --- Per-frame regions, for BufferUsage::Dynamic ---
+        //
+        // A dynamic buffer is rewritten by the CPU every frame while the GPU may still be reading
+        // last frame's contents, so one copy is not enough: the allocation holds kFramesInFlight
+        // copies laid end to end, and update() writes the one belonging to the frame being
+        // recorded. Everything else keeps a single region and behaves exactly as before.
+        size_t m_regionStride = 0;   ///< Distance between two per-frame regions.
+        uint32_t m_regionCount = 1;
+        uint32_t m_latestRegion = 0; ///< Region holding the most recently written full snapshot.
     };
+
+    namespace {
+        /// Metal wants buffer binding offsets aligned; 256 satisfies every supported target.
+        constexpr size_t kBufferRegionAlignment = 256;
+
+        size_t alignUp(size_t value, size_t alignment) {
+            return (value + alignment - 1) / alignment * alignment;
+        }
+    }
 
 // --- Constructor & Destructor ---
 
@@ -85,16 +104,18 @@ namespace dmrender {
             }
         }
 
+        // --- Decide how many copies this buffer needs ---
+        //
+        // Only Dynamic asks for more than one. Static is written once at creation and Stream is
+        // written once and consumed once, so neither can be caught mid-read by the CPU.
+        m_data->m_regionCount = (usage == BufferUsage::Dynamic) ? kFramesInFlight : 1;
+        m_data->m_regionStride = alignUp(size, kBufferRegionAlignment);
+        const size_t totalSize = m_data->m_regionStride * m_data->m_regionCount;
+
         // --- Allocate the native MTLBuffer ---
-        id<MTLBuffer> newBuffer = nil;
-        if (initialData && !m_data->m_isPrivate) {
-            // Shared storage can be initialised in place.
-            newBuffer = [mtlDeviceHandle newBufferWithBytes:initialData length:size options:options];
-        } else {
-            // Private storage has no CPU-visible contents, so it is allocated empty and filled
-            // through the blit path below.
-            newBuffer = [mtlDeviceHandle newBufferWithLength:size options:options];
-        }
+        // Always allocated empty: with several regions there is no single block of initial bytes
+        // to hand to newBufferWithBytes:, so the copies are made explicitly below.
+        id<MTLBuffer> newBuffer = [mtlDeviceHandle newBufferWithLength:totalSize options:options];
 
         if (!newBuffer) {
             throw std::runtime_error("Failed to create native MTLBuffer.");
@@ -110,8 +131,22 @@ namespace dmrender {
         // The 'newBuffer' has a retain count of +1 from the 'new...' methods.
         m_data->m_mtlBuffer = newBuffer;
 
-        if (initialData && m_data->m_isPrivate) {
-            m_data->m_device->uploadToPrivateBuffer((__bridge void*)newBuffer, 0, initialData, size);
+        if (initialData) {
+            if (m_data->m_isPrivate) {
+                // Private storage always has exactly one region, so a single upload covers it.
+                m_data->m_device->uploadToPrivateBuffer((__bridge void*)newBuffer, 0,
+                                                        initialData, size);
+            } else if (void* contents = [newBuffer contents]) {
+                // Every region starts out holding the initial contents, so a frame that binds the
+                // buffer before its first update() still reads the data the caller supplied.
+                for (uint32_t region = 0; region < m_data->m_regionCount; ++region) {
+                    memcpy(static_cast<char*>(contents) + m_data->m_regionStride * region,
+                           initialData, size);
+                }
+                if (m_data->m_isManaged) {
+                    [newBuffer didModifyRange:NSMakeRange(0, totalSize)];
+                }
+            }
         }
     }
 
@@ -158,19 +193,50 @@ namespace dmrender {
         }
 
         void* bufferPointer = [m_data->m_mtlBuffer contents];
-        if (bufferPointer) {
-            // Copy the data from the CPU pointer to the buffer's memory.
-            memcpy(static_cast<char*>(bufferPointer) + offset, data, dataSize);
-
-            // IMPORTANT: If the buffer's storage mode is 'Managed', we must explicitly notify Metal
-            // that the CPU has modified this range. This ensures the changes are synchronized
-            // to the GPU before it's used in a command buffer.
-            if (m_data->m_isManaged) {
-                [m_data->m_mtlBuffer didModifyRange:NSMakeRange(offset, dataSize)];
-            }
-        } else {
+        if (!bufferPointer) {
             NSLog(@"[ERROR] MetalBuffer::update failed: buffer contents are nil.");
+            return;
         }
+
+        // Write into the region belonging to the frame being recorded. The GPU is reading the
+        // other one, and the queue's semaphore guarantees it has finished with this one.
+        const uint32_t region = (m_data->m_regionCount <= 1)
+                              ? 0u
+                              : (m_data->m_device->currentFrameSlot() % m_data->m_regionCount);
+
+        char* base = static_cast<char*>(bufferPointer);
+        const size_t destinationOffset = m_data->m_regionStride * region + offset;
+
+        // A partial write would otherwise leave the rest of this region holding whatever it had
+        // two frames ago, which is not what the caller means by "update these bytes". Refresh the
+        // region from the newest copy first, so it becomes a complete snapshot that happens to
+        // differ in the bytes being written now.
+        //
+        // Skipped when the write covers the whole buffer (nothing to carry) and when this region
+        // already is the newest one (repeated updates within a single frame).
+        const bool coversWholeBuffer = (offset == 0 && dataSize == m_data->m_size);
+        if (m_data->m_regionCount > 1 && !coversWholeBuffer && region != m_data->m_latestRegion) {
+            memcpy(base + m_data->m_regionStride * region,
+                   base + m_data->m_regionStride * m_data->m_latestRegion,
+                   m_data->m_size);
+        }
+
+        memcpy(base + destinationOffset, data, dataSize);
+        m_data->m_latestRegion = region;
+
+        // IMPORTANT: If the buffer's storage mode is 'Managed', we must explicitly notify Metal
+        // that the CPU has modified this range. This ensures the changes are synchronized
+        // to the GPU before it's used in a command buffer.
+        if (m_data->m_isManaged) {
+            [m_data->m_mtlBuffer didModifyRange:NSMakeRange(m_data->m_regionStride * region,
+                                                            m_data->m_size)];
+        }
+    }
+
+    size_t MetalBuffer::currentRegionOffset() const {
+        if (m_data->m_regionCount <= 1) return 0;
+        return m_data->m_regionStride
+             * (m_data->m_device->currentFrameSlot() % m_data->m_regionCount);
     }
 
     MemoryLocation MetalBuffer::memoryLocation() const {
@@ -193,7 +259,9 @@ namespace dmrender {
         if (!contents) {
             throw std::runtime_error("MetalBuffer::readback: buffer contents are nil");
         }
-        memcpy(destination, static_cast<const char*>(contents) + offset, destinationSize);
+        // Read from the newest region, which is the one holding what the caller last wrote.
+        const size_t sourceOffset = m_data->m_regionStride * m_data->m_latestRegion + offset;
+        memcpy(destination, static_cast<const char*>(contents) + sourceOffset, destinationSize);
     }
 
     void* MetalBuffer::nativeHandle() const {

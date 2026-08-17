@@ -23,6 +23,8 @@ namespace dmrender
         /// Reused across uploads and grown on demand, mirroring the Vulkan staging buffer.
         id<MTLBuffer> m_stagingBuffer = nil;
         size_t m_stagingCapacity = 0;
+        /// Which of the kFramesInFlight regions of a dynamic buffer is being written right now.
+        uint32_t m_frameSlot = 0;
     };
 
 
@@ -196,6 +198,14 @@ namespace dmrender
             }
         }
         return SampleCount::One;
+    }
+
+    void MetalDevice::setCurrentFrameSlot(uint32_t slot) {
+        m_data->m_frameSlot = slot % kFramesInFlight;
+    }
+
+    uint32_t MetalDevice::currentFrameSlot() const {
+        return m_data->m_frameSlot;
     }
 
     uint32_t MetalDevice::maxSupportedAnisotropy() const {

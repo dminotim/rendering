@@ -12,6 +12,17 @@ namespace dmrender {
 
 struct MetalDeviceNativeData;
 
+/**
+ * @brief How many frames the CPU is allowed to record ahead of the GPU.
+ *
+ * The same number as the Vulkan backend uses, and for the same two reasons. It bounds latency:
+ * without a limit the CPU runs ahead until something else blocks it, and by then the frame being
+ * displayed was recorded several frames' worth of input ago. And it fixes how many copies a
+ * @c BufferUsage::Dynamic buffer needs, since the CPU must not overwrite bytes the GPU is still
+ * reading — see MetalBuffer, which allocates this many regions and rotates through them.
+ */
+inline constexpr uint32_t kFramesInFlight = 2;
+
 class MetalDevice : public Device
 {
 public:
@@ -47,6 +58,17 @@ public:
 
     SampleCount maxSupportedSampleCount() const override;
     uint32_t maxSupportedAnisotropy() const override;
+
+    /**
+     * @brief Selects which region of every dynamic buffer subsequent updates write into.
+     *
+     * Called by the command queue as it opens and closes a frame; nothing else should touch it.
+     * MetalBuffer::update() reads it to decide where in its allocation to put the bytes.
+     */
+    void setCurrentFrameSlot(uint32_t slot);
+
+    /// @brief Index of the frame slot currently being recorded, in [0, kFramesInFlight).
+    uint32_t currentFrameSlot() const;
 
     /**
      * @brief Copies CPU data into a private-storage MTLBuffer through a staging buffer.
