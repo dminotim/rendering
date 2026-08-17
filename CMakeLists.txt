@@ -22,8 +22,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Found two ways. An installed copy wins if there is one; otherwise a source checkout is added
 # directly, which is what a side-by-side working copy wants. Source builds also give this project
 # the `glfw` and `imgui` targets, which it uses for the window and its own interface.
-set(DMRENDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../dmrender"
-        CACHE PATH "Source checkout of the dmrender wrapper")
+# The repository is named dmwrapper while the library and its CMake target are named dmrender, so
+# a plain `git clone` lands in ../dmwrapper and an explicitly named one in ../dmrender. Both are
+# accepted: making the default depend on how the dependency happened to be cloned is a bad trade
+# for one line of loop.
+set(_dmrender_default "${CMAKE_CURRENT_SOURCE_DIR}/../dmwrapper")
+foreach(_candidate dmwrapper dmrender)
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../${_candidate}/CMakeLists.txt")
+        set(_dmrender_default "${CMAKE_CURRENT_SOURCE_DIR}/../${_candidate}")
+        break()
+    endif()
+endforeach()
+set(DMRENDER_DIR "${_dmrender_default}"
+        CACHE PATH "Source checkout of the dmrender wrapper (repository: dmwrapper)")
 
 find_package(dmrender QUIET CONFIG)
 if(dmrender_FOUND)
@@ -31,9 +42,9 @@ if(dmrender_FOUND)
 else()
     if(NOT EXISTS "${DMRENDER_DIR}/CMakeLists.txt")
         message(FATAL_ERROR
-                "dmrender not found.\n"
+                "dmrender not found (looked in ${DMRENDER_DIR}).\n"
                 "Clone it next to this repository:\n"
-                "    git clone --recurse-submodules <url> ${DMRENDER_DIR}\n"
+                "    git clone --recurse-submodules https://github.com/dminotim/dmwrapper.git\n"
                 "or set DMRENDER_DIR to an existing checkout, or install it and let\n"
                 "find_package(dmrender) pick it up.")
     endif()

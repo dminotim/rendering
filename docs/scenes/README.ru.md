@@ -1,7 +1,7 @@
 # Рендеринг сцен: от треугольника до San Miguel
 
 Курс по **использованию** нашего рендерера. Первая книга
-([dmrender/docs/book](../../../dmrender/docs/book/README.ru.md)) была про то, как обёртка устроена изнутри — как
+([dmrender/docs/book](https://github.com/dminotim/dmwrapper/blob/main/docs/book/README.ru.md)) была про то, как обёртка устроена изнутри — как
 из Vulkan и Metal получается один общий слой. Эта книга начинается там, где та заканчивается:
 обёртка готова, бэкенды работают, и теперь надо построить на ней настоящую графику.
 
@@ -300,8 +300,8 @@ GPU: как работает планировщик, почему шейдер �
 12. [Часть XII. Большие сцены](12-bolshie-sceny.ru.md)
 13. [Часть XIII. Границы обёртки](13-ogranicheniya.ru.md)
 
-Справочник по API — [dmrender/docs/API.ru.md](../../../dmrender/docs/API.ru.md).
-Книга про устройство самой обёртки — [dmrender/docs/book](../../../dmrender/docs/book/README.ru.md).
+Справочник по API — [dmrender/docs/API.ru.md](https://github.com/dminotim/dmwrapper/blob/main/docs/API.ru.md).
+Книга про устройство самой обёртки — [dmrender/docs/book](https://github.com/dminotim/dmwrapper/blob/main/docs/book/README.ru.md).
 
 Обёртка живёт в отдельном репозитории, и её документация переехала вместе с ней. Как подключить её
 к проекту — [глава 0](00-proekt.ru.md).

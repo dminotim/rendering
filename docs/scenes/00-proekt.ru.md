@@ -21,7 +21,7 @@ Vulkan или Metal: заголовки бэкендов не устанавли
 что-то из кода приложения захотело `VkDevice`, это ошибка компиляции, а не вопрос дисциплины.
 
 ```
-dmrender/                    ← библиотека, отдельный репозиторий
+dmwrapper/                   ← библиотека dmrender, отдельный репозиторий
   render_pipeline/           публичный API: Device, SwapChain, CommandBuffer, Pipeline, GBuffer…
   render_vulkan/             реализация на Vulkan   (Windows)  — приватная
   render_metal/              реализация на Metal    (macOS)    — приватная
@@ -51,14 +51,22 @@ Vulkan SDK нужен целиком, а не только рантайм: из 
 ### Забрать обёртку
 
 ```sh
-git clone --recurse-submodules <url-dmrender> dmrender
+git clone --recurse-submodules https://github.com/dminotim/dmwrapper.git
 ```
+
+**Про имена.** Репозиторий называется `dmwrapper`, а библиотека и её цель в CMake — `dmrender`.
+Это не опечатка: имя репозитория и имя пакета — разные вещи, и второе встречается в коде, а первое
+только в командах git. В `CMakeLists.txt` вы пишете `dmrender::dmrender` независимо от того, в
+какой каталог склонировали.
+
+Каталог по умолчанию ищется рядом с проектом — сначала `../dmwrapper`, потом `../dmrender`, так что
+обычный `git clone` подходит. Любое другое расположение задаётся через `DMRENDER_DIR`.
 
 `--recurse-submodules` обязателен: GLFW и Dear ImGui подключены подмодулями. Если уже склонировали
 без него:
 
 ```sh
-cd dmrender && git submodule update --init --recursive
+cd dmwrapper && git submodule update --init --recursive
 ```
 
 Симптом забытых подмодулей — `FATAL_ERROR` от CMake с явным текстом про то, какой каталог пуст.
@@ -84,7 +92,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 # --- обёртка ---
-set(DMRENDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../dmrender"
+set(DMRENDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../dmwrapper"
         CACHE PATH "Source checkout of the dmrender wrapper")
 
 find_package(dmrender QUIET CONFIG)
@@ -170,13 +178,16 @@ clang сам определяет Objective-C++ по расширению, та�
 из командной строки.
 
 ```sh
-cmake -S . -B build -DDMRENDER_DIR=/opt/src/dmrender
+cmake -S . -B build -DDMRENDER_DIR=/opt/src/dmwrapper
 ```
 
 `CACHE PATH` вместо обычного `set()` — чтобы значение переопределялось снаружи. Без `CACHE`
 переменная локальна для конфигурации, и флаг `-D` её не изменит.
 
-Значение по умолчанию `../dmrender` предполагает, что оба репозитория лежат рядом.
+Значение по умолчанию `../dmwrapper` предполагает, что оба репозитория лежат рядом. В
+`CMakeLists.txt` просмотрщика вместо одного пути перебирается короткий список имён — `dmwrapper`,
+потом `dmrender`, — чтобы результат не зависел от того, переименовали каталог при клонировании или
+нет.
 
 ### `find_package(dmrender QUIET CONFIG)`
 

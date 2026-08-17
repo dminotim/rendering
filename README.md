@@ -1,6 +1,6 @@
 # Просмотрщик сцен
 
-Приложение поверх [dmrender](../dmrender) — обёртки над Vulkan и Metal. Обёртка раньше лежала в
+Приложение поверх [dmrender](https://github.com/dminotim/dmwrapper) — обёртки над Vulkan и Metal. Обёртка раньше лежала в
 этом же репозитории (`render_pipeline/`, `render_vulkan/`, `render_metal/`) и вынесена в отдельный;
 здесь остался только рендерер.
 
@@ -17,13 +17,16 @@ tools/unity_import/          конвертация сцен из .unitypackage
 Обёртку нужно склонировать рядом:
 
 ```sh
-git clone --recurse-submodules <url-dmrender> ../dmrender
+git clone --recurse-submodules https://github.com/dminotim/dmwrapper.git ../dmwrapper
 cmake -S . -B build
 cmake --build build --config Release
 ```
 
-CMake сам подхватит `../dmrender`. Если она лежит в другом месте — `-DDMRENDER_DIR=/path/to/dmrender`;
-если установлена — `find_package(dmrender)` найдёт её и локальная копия не понадобится.
+CMake ищет её рядом с проектом — сначала `../dmwrapper`, потом `../dmrender`. Если лежит в другом
+месте — `-DDMRENDER_DIR=/path/to/dmwrapper`; если установлена — `find_package(dmrender)` найдёт её и
+локальная копия не понадобится.
+
+Репозиторий называется `dmwrapper`, библиотека и её цель в CMake — `dmrender`.
 
 Требуется Vulkan SDK на Windows (в том числе `glslc`) и Xcode на macOS.
 
@@ -62,7 +65,7 @@ DMRENDER_MODEL=path/to/scene.obj  build/Release/RenderingApp
 | [tools/unity_import/](tools/unity_import/README.md) | Как достать раскладку сцены из `.unitypackage` |
 
 Документация самой обёртки — справочник по API, книга о её внутреннем устройстве и обзор пайплайна
-— переехала вместе с ней в [dmrender/docs](../dmrender/docs).
+— переехала вместе с ней в [dmwrapper/docs](https://github.com/dminotim/dmwrapper/tree/main/docs).
 
 ## Заметки
 
