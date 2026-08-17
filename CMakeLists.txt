@@ -1,87 +1,60 @@
 # --- Project Definition ---
-# Specifies the minimum required version of CMake and defines the project.
-cmake_minimum_required(VERSION 3.20) # Lowered for better compatibility
+cmake_minimum_required(VERSION 3.20)
+
+project(RenderingProject LANGUAGES C CXX)
+
+# Objective-C++ is enabled after project() rather than listed in it: APPLE is only defined once
+# project() has run, so testing it beforehand silently takes the wrong branch.
 if(APPLE)
-    project(RenderingProject LANGUAGES C CXX OBJC OBJCXX)
-else()
-    project(RenderingProject LANGUAGES C CXX)
+    enable_language(OBJCXX)
 endif()
 
-# Set the C++ standard for the entire project.
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF) # Good practice to disable compiler-specific extensions
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# --- Resource Management: Define shader path ---
-# This creates a compile-time definition for the shader directory.
-# We check if a custom path is provided, otherwise use a default relative path.
+# --- The graphics wrapper -----------------------------------------------------------------------
+#
+# dmrender used to live in this repository under render_pipeline/, render_vulkan/ and
+# render_metal/. It is now a library with its own repository, and this project is one of its
+# consumers: nothing below knows which graphics API is underneath.
+#
+# Found two ways. An installed copy wins if there is one; otherwise a source checkout is added
+# directly, which is what a side-by-side working copy wants. Source builds also give this project
+# the `glfw` and `imgui` targets, which it uses for the window and its own interface.
+set(DMRENDER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../dmrender"
+        CACHE PATH "Source checkout of the dmrender wrapper")
+
+find_package(dmrender QUIET CONFIG)
+if(dmrender_FOUND)
+    message(STATUS "Using installed dmrender ${dmrender_VERSION}")
+else()
+    if(NOT EXISTS "${DMRENDER_DIR}/CMakeLists.txt")
+        message(FATAL_ERROR
+                "dmrender not found.\n"
+                "Clone it next to this repository:\n"
+                "    git clone --recurse-submodules <url> ${DMRENDER_DIR}\n"
+                "or set DMRENDER_DIR to an existing checkout, or install it and let\n"
+                "find_package(dmrender) pick it up.")
+    endif()
+    message(STATUS "Using dmrender from source: ${DMRENDER_DIR}")
+    add_subdirectory("${DMRENDER_DIR}" "${CMAKE_BINARY_DIR}/dmrender")
+endif()
+
+# --- Resource Management: Define shader path ----------------------------------------------------
+#
+# The renderer's own shaders, not the wrapper's. Metal compiles its sources at runtime so they are
+# used in place; Vulkan consumes pre-compiled SPIR-V, so the path points at the build output.
 if(NOT DEFINED SHADER_DIR)
     if(APPLE)
-        # Metal compiles its shaders at runtime, so the sources are used in place.
-        set(SHADER_DIR "${CMAKE_SOURCE_DIR}/shaders/metal")
-    elseif(WIN32)
-        # Vulkan consumes pre-compiled SPIR-V, so SHADER_DIR points at the build output
-        # rather than at the GLSL sources in shaders/glsl.
+        set(SHADER_DIR "${CMAKE_CURRENT_SOURCE_DIR}/shaders/metal")
+    else()
         set(SHADER_DIR "${CMAKE_BINARY_DIR}/shaders")
     endif()
 endif()
-option(ENABLE_VULKAN_DEBUG "Enable feature FOO" OFF)
-
-if(ENABLE_VULKAN_DEBUG)
-    add_compile_definitions(ENABLE_VALIDATION_LAYER=1)
-else()
-    add_compile_definitions(ENABLE_VALIDATION_LAYER=0)
-endif()
-# Add the definition to all targets in the project.
-add_compile_definitions(SHADER_DIR="${SHADER_DIR}")
 message(STATUS "Shaders directory set to: ${SHADER_DIR}")
 
-# --- External Dependencies ---
-# Add submodules/external libraries.
-find_package(Vulkan REQUIRED)
-add_subdirectory(external/glfw)
-
-# --- Source File Collection (Automated) ---
-# This is much cleaner and more maintainable than listing every file.
-
-# 1. Gather all abstract interface files from the render_pipeline directory.
-file(GLOB_RECURSE PIPELINE_INTERFACE_SRC
-        "${CMAKE_SOURCE_DIR}/render_pipeline/*.hpp"
-        "${CMAKE_SOURCE_DIR}/render_pipeline/*.cpp"
-)
-
-# 2. Gather platform-specific implementation files.
-# We'll add them to the main source list based on the target OS.
-set(PLATFORM_SRC "")
-if(APPLE)
-    message(STATUS "Configuring for Apple (macOS/iOS)")
-    # Gather all Metal implementation files.
-    file(GLOB_RECURSE METAL_IMPL_SRC
-            "${CMAKE_SOURCE_DIR}/render_metal/*.hpp"
-            "${CMAKE_SOURCE_DIR}/render_metal/*.mm"
-    )
-    list(APPEND PLATFORM_SRC ${METAL_IMPL_SRC})
-
-    # ImGui backend for Metal
-    list(APPEND PLATFORM_SRC
-            external/imgui/backends/imgui_impl_metal.mm
-    )
-elseif(WIN32)
-    message(STATUS "Configuring for Windows")
-     file(GLOB_RECURSE VULKAN_IMPL_SRC
-            "${CMAKE_SOURCE_DIR}/render_vulkan/*.hpp"
-            "${CMAKE_SOURCE_DIR}/render_vulkan/*.cpp"
-    )
-    list(APPEND PLATFORM_SRC ${VULKAN_IMPL_SRC})
-    list(APPEND PLATFORM_SRC
-            external/imgui/backends/imgui_impl_vulkan.cpp
-    )
-else()
-    message(FATAL_ERROR "Unsupported platform! Only Apple and Windows are configured.")
-endif()
-
-
-# --- Main Application Target ---
+# --- Main Application Target --------------------------------------------------------------------
 set(APP_NAME "RenderingApp")
 
 set(ALL_SOURCE_FILES
@@ -90,30 +63,22 @@ set(ALL_SOURCE_FILES
         FastRenderer.hpp
         FastRenderer.cpp
 
-        # Model loading (application-level: the abstraction knows nothing about file formats)
+        # Model loading (application-level: the wrapper knows nothing about file formats)
         mesh/Mesh.hpp
         mesh/Mesh.cpp
+        mesh/FbxLoader.cpp
+        mesh/SceneKit.cpp
         mesh/SceneCache.cpp
 
         # Texture loading and sharing
         texture/TextureCache.hpp
         texture/TextureCache.cpp
-
-        # ImGui core and common backend files
-        external/imgui/imgui.cpp
-        external/imgui/imgui_draw.cpp
-        external/imgui/imgui_tables.cpp
-        external/imgui/imgui_widgets.cpp
-        external/imgui/backends/imgui_impl_glfw.cpp
-
-        # Abstract interfaces
-        ${PIPELINE_INTERFACE_SRC}
-
-        # Platform-specific implementation
-        ${PLATFORM_SRC}
 )
 
 add_executable(${APP_NAME} ${ALL_SOURCE_FILES})
+
+# SHADER_DIR is this target's business alone; the wrapper takes shader paths as arguments.
+target_compile_definitions(${APP_NAME} PRIVATE SHADER_DIR="${SHADER_DIR}")
 
 # tinyobjloader embeds a copy of fast_float whose C++20 constexpr paths MSVC rejects: the
 # SIMD digit-parsing helpers are marked constexpr but call intrinsics, and MSVC enforces that
@@ -124,17 +89,16 @@ if(MSVC)
     set_source_files_properties(mesh/Mesh.cpp PROPERTIES COMPILE_OPTIONS "/std:c++17")
 endif()
 
-# --- Shader Compilation (Vulkan only) ---
-# Metal compiles PlaneShader.metal at runtime and picks the entry point by name. Vulkan has no
-# runtime GLSL compiler, so each entry point is compiled to its own SPIR-V module here. The file
-# names encode the same logical function names the Metal code uses:
+# --- Shader Compilation (Vulkan only) -----------------------------------------------------------
+# Metal compiles .metal sources at runtime and picks the entry point by name. Vulkan has no runtime
+# GLSL compiler, so each entry point is compiled to its own SPIR-V module here. The file names
+# encode the same logical function names the Metal code uses:
 #
-#   plane_vertex_shader   -> ${SHADER_DIR}/PlaneShader.plane_vertex_shader.spv
-#   plane_fragment_shader -> ${SHADER_DIR}/PlaneShader.plane_fragment_shader.spv
+#   mesh_vertex_shader -> ${SHADER_DIR}/Mesh.mesh_vertex_shader.spv
 #
-# which is exactly what VulkanShaderFunction looks for, so application code can keep passing an
-# extensionless path plus a function name on both platforms.
-if(WIN32)
+# which is exactly what the wrapper's Vulkan shader loader looks for, so application code can keep
+# passing an extensionless path plus a function name on both platforms.
+if(NOT APPLE)
     find_program(GLSLC_EXECUTABLE
             NAMES glslc glslc.exe
             HINTS "$ENV{VULKAN_SDK}/Bin" "$ENV{VULKAN_SDK}/bin"
@@ -145,17 +109,11 @@ if(WIN32)
     endif()
     message(STATUS "Using shader compiler: ${GLSLC_EXECUTABLE}")
 
-    # source file : logical function name : name of the .metal file it corresponds to
-    #
-    # Only the shaders the viewer actually uses are compiled. The earlier demo shaders
-    # (PlaneShader, Composite, Overlay, Cube) are still on disk and referenced by the docs; add
-    # them back here to build them again.
-    #
-    # The last field exists because several GLSL sources map onto entry points of a single Metal
-    # file — PlaneShader.metal holds both plane_fragment_shader and plane_fragment_shader_mrt —
-    # and the artifact must be named after the file the application asks for, not after the GLSL
-    # source it happened to be compiled from.
     # source file | logical function name | stem of the .metal file | extra glslc flags
+    #
+    # The third field exists because several GLSL sources map onto entry points of a single Metal
+    # file, and the artifact must be named after the file the application asks for rather than
+    # after the GLSL source it happened to be compiled from.
     #
     # Mesh.frag is compiled twice from one source: the masked variant differs only by an alpha
     # test, and keeping two near-identical files in sync by hand is exactly the kind of thing
@@ -177,7 +135,7 @@ if(WIN32)
         list(GET _parts 2 _shader_stem)
         list(GET _parts 3 _extra_flags)
 
-        set(_shader_src "${CMAKE_SOURCE_DIR}/shaders/glsl/${_shader_file}")
+        set(_shader_src "${CMAKE_CURRENT_SOURCE_DIR}/shaders/glsl/${_shader_file}")
         set(_spirv_out "${SHADER_DIR}/${_shader_stem}.${_function_name}.spv")
 
         separate_arguments(_flag_list UNIX_COMMAND "${_extra_flags}")
@@ -207,55 +165,41 @@ if(WIN32)
     set_source_files_properties(${GLSL_SOURCE_FILES} PROPERTIES HEADER_FILE_ONLY TRUE)
 endif()
 
-# --- Target Configuration: Include Directories ---
+# --- Include Directories ------------------------------------------------------------------------
+#
+# Only this project's own headers and its header-only loaders. The wrapper's public headers arrive
+# through the dmrender target, and GLFW's and ImGui's through theirs.
 target_include_directories(${APP_NAME} PRIVATE
-        # Public headers for external libraries
-        external/glfw/include
-        external/imgui
-        external/imgui/backends
-
         # Header-only model loaders (all MIT licensed)
         external/tinyobjloader     # OBJ + MTL, including texture references
         external/happly            # PLY, binary and ASCII
         external/microstl          # STL, binary and ASCII
         external/stb               # stb_image: PNG/JPG/TGA decoding (public domain)
 
-        # Project-specific headers
-        . # Include the root project directory for FastRenderer.hpp etc.
-        render_pipeline
+        .                          # FastRenderer.hpp, mesh/, texture/
 )
 
-# --- Platform-Specific Configuration ---
-if(APPLE)
-    # For Metal backend, we need to include its header directory.
-    target_include_directories(${APP_NAME} PRIVATE render_metal)
+# --- Linking ------------------------------------------------------------------------------------
+#
+# glfw and imgui are named explicitly rather than inherited: this project uses both directly — it
+# creates the window and draws its own interface — so it declares them itself rather than relying
+# on what the wrapper happens to expose.
+target_link_libraries(${APP_NAME} PRIVATE
+        dmrender::dmrender
+        glfw
+        imgui
+)
 
-    # Link against required Apple frameworks for Metal and windowing.
-    target_link_libraries(${APP_NAME} PRIVATE
-            glfw
-            "-framework Cocoa"
-            "-framework QuartzCore"
-            "-framework Metal"
-            "-framework Foundation" # Often needed for Objective-C objects
-    )
-elseif(WIN32)
-    target_include_directories(${APP_NAME} PRIVATE render_vulkan)
-    target_link_libraries(${APP_NAME} PRIVATE
-            glfw
-            Vulkan::Vulkan
-    )
 if(MSVC)
     foreach(_source ${ALL_SOURCE_FILES})
-	    if (IS_ABSOLUTE "${_source}")
-		    file(RELATIVE_PATH _source_rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_source}")
-	    else()
-		    set(_source_rel "${_source}")
-	    endif()
-	    get_filename_component(_source_path "${_source_rel}" PATH)
-	    string(REPLACE "/" "\\" _source_path_msvc "${_source_path}")
-	    source_group("${_source_path_msvc}" FILES "${_source}")
+        if(IS_ABSOLUTE "${_source}")
+            file(RELATIVE_PATH _source_rel "${CMAKE_CURRENT_SOURCE_DIR}" "${_source}")
+        else()
+            set(_source_rel "${_source}")
+        endif()
+        get_filename_component(_source_path "${_source_rel}" PATH)
+        string(REPLACE "/" "\\" _source_path_msvc "${_source_path}")
+        source_group("${_source_path_msvc}" FILES "${_source}")
     endforeach()
     target_compile_options(${APP_NAME} PRIVATE /bigobj /WX /W0)
-endif(MSVC)
-
 endif()

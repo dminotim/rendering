@@ -51,6 +51,31 @@ namespace dmrender {
         return quantise(px) | (quantise(py) << 16);
     }
 
+    void unpackNormal(uint32_t packed, float out[3])
+    {
+        // Exactly the inverse of the mapping above, and the same arithmetic the shaders do.
+        auto dequantise = [](uint32_t bits) -> float {
+            const int16_t signedValue = static_cast<int16_t>(static_cast<uint16_t>(bits));
+            return std::max(-1.0f, static_cast<float>(signedValue) / 32767.0f);
+        };
+        float x = dequantise(packed & 0xFFFFu);
+        float y = dequantise((packed >> 16) & 0xFFFFu);
+        float z = 1.0f - (std::abs(x) + std::abs(y));
+
+        // Below the fold, the square's corners hold the lower hemisphere; fold them back.
+        if (z < 0.0f) {
+            const float fx = (1.0f - std::abs(y)) * (x >= 0.0f ? 1.0f : -1.0f);
+            const float fy = (1.0f - std::abs(x)) * (y >= 0.0f ? 1.0f : -1.0f);
+            x = fx; y = fy;
+        }
+
+        const float length = std::sqrt(x * x + y * y + z * z);
+        if (length < 1e-20f) { out[0] = 0.0f; out[1] = 1.0f; out[2] = 0.0f; return; }
+        out[0] = x / length;
+        out[1] = y / length;
+        out[2] = z / length;
+    }
+
     namespace {
 
         // ─────────────────────────────────────────────────────────────────────
@@ -493,8 +518,11 @@ namespace dmrender {
         if (extension == ".obj")      ok = loadObj(path, mesh, error);
         else if (extension == ".stl") ok = loadStl(path, mesh, error);
         else if (extension == ".ply") ok = loadPly(path, mesh, error);
+        else if (extension == ".fbx") ok = loadFbx(path, mesh, error);
+        else if (extension == ".dmscene") ok = loadScene(path, mesh, error);
         else {
-            error = "unsupported extension: " + extension + " (expected .obj, .stl or .ply)";
+            error = "unsupported extension: " + extension
+                  + " (expected .obj, .stl, .ply, .fbx or .dmscene)";
             return mesh;
         }
 
