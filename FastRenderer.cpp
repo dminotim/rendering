@@ -1368,6 +1368,39 @@ namespace dmrender
             cmd->endRenderPass();
         };
 
+        /**
+         * @brief Everything the shadow pass needs, in one call.
+         *
+         * Exists as a single function on purpose. Building the caster lists and recording the
+         * cascade passes used to be separate calls made by each render path, and the interactive
+         * path ended up making only the second of them: the cascades rendered, but with an empty
+         * list, so every layer was cleared to "nothing in the way" and the window showed no
+         * shadows at all while the offscreen capture — which did call both — showed them
+         * correctly. Two paths that must agree should share one function, not two calls in the
+         * right order.
+         *
+         * @pre cascades[] is current and fillFrameUniforms() has uploaded the per-cascade
+         *      matrices for this frame.
+         */
+        auto renderShadows = [&](const std::shared_ptr<CommandBuffer>& cmd) {
+            if (shadowsEnabled) {
+                buildShadowLists();
+            } else if (!shadowMapsInitialised) {
+                // Shadows are off, but the lighting shader still declares the cascade array —
+                // the branch is inside the shader, not around the binding — so the image needs a
+                // defined layout. One clear-only round gives it that.
+                for (ShadowList& list : shadowLists) {
+                    list.opaque.clear();
+                    list.maskedSubsets.clear();
+                }
+            } else {
+                return;
+            }
+
+            for (uint32_t c = 0; c < kCascadeCount; ++c) recordShadowCascade(cmd, c);
+            shadowMapsInitialised = true;
+        };
+
         // ── Offscreen capture ──
         //
         // Set DMRENDER_SCREENSHOT to a path prefix to render a few fixed viewpoints to PNG and
@@ -1476,16 +1509,12 @@ namespace dmrender
                 //
                 // Uploading every frame is also the honest measurement: a real frame does this work.
                 auto renderOnce = [&]() {
-                    if (shadowsEnabled) buildShadowLists();
                     fillFrameUniforms(shotViewProjection, shotCamera.position,
                                       shotCamera.forward());
 
                     std::shared_ptr<CommandBuffer> cmd = helper::createCommandBuffer(queue);
 
-                    if (shadowsEnabled || !shadowMapsInitialised) {
-                        for (uint32_t c = 0; c < kCascadeCount; ++c) recordShadowCascade(cmd, c);
-                        shadowMapsInitialised = true;
-                    }
+                    renderShadows(cmd);
 
                     std::shared_ptr<RenderPassDescriptor> pass = helper::createRenderPassDescriptor();
                     if (shotMultisampled) {
@@ -1762,20 +1791,7 @@ namespace dmrender
 
             // ── Shadow passes, before anything reads their result ──
             std::shared_ptr<CommandBuffer> cmd = helper::createCommandBuffer(queue);
-            if (shadowsEnabled) {
-                for (uint32_t c = 0; c < kCascadeCount; ++c) recordShadowCascade(cmd, c);
-                shadowMapsInitialised = true;
-            } else if (!shadowMapsInitialised) {
-                // The lighting shader still declares the cascade array even with shadows off —
-                // the branch is inside the shader, not around the binding — so the image needs a
-                // defined layout regardless. One clear-only round does that.
-                for (ShadowList& list : shadowLists) {
-                    list.opaque.clear();
-                    list.maskedSubsets.clear();
-                }
-                for (uint32_t c = 0; c < kCascadeCount; ++c) recordShadowCascade(cmd, c);
-                shadowMapsInitialised = true;
-            }
+            renderShadows(cmd);
 
             // ── Scene pass ──
             const bool multisampled = useMsaa && msaaSamples != SampleCount::One;
